@@ -129,27 +129,50 @@
     let selected = null
     let userAddress = null
 
-    function setStatus(msg, kind = "") {
+    function setStatus(msg, kind = "", linkHref = null, linkText = null) {
       const el = $("status")
-      if (!msg) { el.innerHTML = ""; return }
-      el.innerHTML = `<div class="status ${kind}">${msg}</div>`
+      el.innerHTML = ""
+      if (!msg) return
+      const wrap = makeEl("div", "status " + kind)
+      wrap.appendChild(document.createTextNode(msg))
+      if (linkHref) {
+        wrap.appendChild(document.createTextNode(" "))
+        const a = document.createElement("a")
+        a.href = linkHref
+        a.target = "_blank"
+        a.rel = "noopener noreferrer"
+        a.style.color = "inherit"
+        a.textContent = linkText || "Open ↗"
+        wrap.appendChild(a)
+      }
+      el.appendChild(wrap)
+    }
+
+    function makeEl(tag, cls, text) {
+      const el = document.createElement(tag)
+      if (cls) el.className = cls
+      if (text != null) el.textContent = text
+      return el
     }
 
     function renderPlans() {
       const root = $("plans")
       root.innerHTML = ""
       if (!plans.length) {
-        root.innerHTML = `<div style="color: var(--muted); font-size: 13px; padding: 8px;">No active plans.</div>`
+        root.appendChild(makeEl("div", null, "No active plans."))
         return
       }
       for (const p of plans) {
         if (!p.active) continue
-        const div = document.createElement("div")
-        div.className = "plan" + (selected?.id === p.id ? " selected" : "")
-        div.innerHTML = `
-          <span class="plan-name">${p.id}</span>
-          <span class="plan-price">${CONFIG.tokenSymbol} ${fmt(p.price_atomic)} / ${p.period_count} ${p.period_unit}${p.period_count > 1 ? "s" : ""}</span>
-        `
+        // Construct each row via textContent — NEVER innerHTML with plan
+        // strings. Plan IDs are controlled by the integrator's admin API
+        // and could contain HTML if not sanitized upstream; we don't take
+        // the chance.
+        const div = makeEl("div", "plan" + (selected?.id === p.id ? " selected" : ""))
+        div.appendChild(makeEl("span", "plan-name", String(p.id)))
+        const unit = String(p.period_unit) + (p.period_count > 1 ? "s" : "")
+        div.appendChild(makeEl("span", "plan-price",
+          `${CONFIG.tokenSymbol} ${fmt(p.price_atomic)} / ${p.period_count} ${unit}`))
         div.onclick = () => { selected = p; renderPlans(); updateCTA() }
         root.appendChild(div)
       }
@@ -276,7 +299,7 @@
           throw new Error(`Subscribe failed: ${err}`)
         }
 
-        setStatus(`Subscribed to ${selected.id}. <a href="${CONFIG.blockExplorer}/tx/${txHash}" target="_blank" style="color: inherit;">View approval ↗</a>`, "success")
+        setStatus(`Subscribed to ${selected.id}.`, "success", `${CONFIG.blockExplorer}/tx/${txHash}`, "View approval ↗")
         cta.textContent = "Subscribed"
       } catch (e) {
         const msg = e.message || String(e)

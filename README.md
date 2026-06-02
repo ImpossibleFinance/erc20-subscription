@@ -232,13 +232,31 @@ The Subscribed step lives entirely on your backend — call `POST /admin/subscri
 
 ## Security checklist (prod)
 
-- [ ] Owner is a multisig (Safe / similar). Never an EOA on mainnet.
-- [ ] Operator is a dedicated hot key, no other privileges anywhere, funded with enough ETH for ~year of charges.
+### Keys / addresses
+- [ ] **Owner is a multisig** (Safe / similar). Never an EOA on mainnet.
+- [ ] **Treasury is immutable** in this contract — pick a cold wallet or the same multisig at deploy time. To rotate, deploy a new contract.
+- [ ] **Operator** is a dedicated hot key, no other privileges anywhere, funded with enough ETH (the backend warns you via `operator.gas_low` before it runs out).
+- [ ] **Don't put the operator key in plain env vars long-term** — read from a secrets manager (Vault, SOPS, AWS Secrets Manager) at startup, or move signing to KMS/HSM. The current `OPERATOR_KEY_HEX` is fine for dev, risky for prod (process env is reachable from a lot of attack vectors).
+
+### Secrets
 - [ ] `WEBHOOK_SECRET` and `ADMIN_TOKEN` are 32+ random bytes from a secret manager.
-- [ ] Treasury is a cold wallet or the same multisig.
-- [ ] After deploying, run `forge verify-contract` so Etherscan/Basescan renders the source.
-- [ ] Monitor: operator ETH balance, Charged event rate, in-flight tx age. Alert if charges stop.
-- [ ] Recommend users approve only ~12 months of plan price — re-approval is the safety budget against operator compromise.
+- [ ] Webhook receivers compare HMAC in **constant time** (`hmac.Equal` in Go, `crypto.timingSafeEqual` in Node).
+- [ ] Integrator's `/api/subscribe` route has **CSRF protection** (Origin/Referer check, SameSite cookie, or anti-CSRF token) — the checkout template sends credentials.
+
+### Deployment
+- [ ] **Single scheduler instance only.** Multiple backend processes will both submit pulls and step on the operator's nonce. There's no distributed lock today. Run one replica; use a process manager (systemd, k8s `replicas: 1` with `strategy: Recreate`) to enforce it.
+- [ ] **Redis with AOF** (`appendonly yes`, `appendfsync everysec`). RDB-only loses recent state on crash, and without `LastChargedAt` the scheduler can re-pull a sub the contract just charged.
+- [ ] **Redis replication / backups.** If Redis dies for good, you lose sub state; on-chain pulls would resume from "first cycle" semantics, which is wrong.
+- [ ] **Public read endpoints behind a rate limiter** (Cloudflare, nginx) — `GET /plans` and `/subscriptions/{addr}` are CORS-open and unauthenticated.
+- [ ] **Use a trusted RPC** (Alchemy/Infura/QuickNode), ideally with a secondary. A lying RPC can mis-estimate gas or hide receipts.
+
+### Contract & UX
+- [ ] After deploying, run `forge verify-contract` so block explorers render the source — users can verify what they're approving.
+- [ ] Recommend users approve **only ~12 months** of plan price. Re-approval is the safety budget against operator compromise — never recommend `MaxUint256`.
+- [ ] Monitor: operator ETH balance, `Charged` event rate, in-flight tx age. Alert if charges stop or the `operator.tx_stuck` webhook fires.
+
+### Audit before mainnet
+- [ ] The contract has no upgrade path. A bug means redeploy + user-side migration. Get it reviewed.
 
 ---
 
