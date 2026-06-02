@@ -7,7 +7,7 @@ Two pieces:
 - **`contracts/`** — a ~50-line Solidity contract. Users approve it once on the payment token; the operator pulls. No upgrades, no proxies, no on-chain plan state.
 - **`backend/`** — a Go service that schedules pulls, runs dunning, watches each user's remaining allowance, and emits HMAC-signed webhooks. Redis-backed; one binary.
 
-Designed to drop into any web service that wants Web3-native recurring billing. Integrates cleanly with [impossible-hosting](https://github.com/ImpossibleFinance/impossible-hosting) via webhooks.
+Designed to drop into any web service that wants Web3-native recurring billing.
 
 ---
 
