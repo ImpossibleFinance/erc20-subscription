@@ -94,7 +94,9 @@ func (m *MemoryStore) DueBefore(_ context.Context, t time.Time, limit int) ([]*S
 		if s.Status != StatusActive && s.Status != StatusPastDue {
 			continue
 		}
-		if !s.NextAttemptAt.After(t) {
+		// Pending one-time charges always count as due; otherwise check
+		// the regular cycle clock.
+		if s.PendingChargeAtomic != "" || !s.NextAttemptAt.After(t) {
 			cp := *s
 			due = append(due, &cp)
 		}

@@ -18,10 +18,12 @@ import (
 )
 
 const (
-	EventCharged       = "subscription.charged"
-	EventPaymentFailed = "subscription.payment_failed"
-	EventCancelled     = "subscription.cancelled"
-	EventAllowanceLow  = "subscription.allowance_low"
+	EventCharged           = "subscription.charged"
+	EventPaymentFailed     = "subscription.payment_failed"
+	EventCancelled         = "subscription.cancelled"
+	EventAllowanceLow      = "subscription.allowance_low"
+	EventAllowanceRequired = "subscription.allowance_required"
+	EventProratedCharge    = "subscription.prorated_charge"
 )
 
 type Event struct {

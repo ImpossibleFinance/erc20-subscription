@@ -94,8 +94,15 @@ func (s *RedisStore) UpsertSubscription(ctx context.Context, sub *Subscription) 
 	}
 	pipe.SAdd(ctx, "subs:"+sub.Status, sub.User)
 
-	if sub.Status == StatusActive || sub.Status == StatusPastDue {
-		pipe.ZAdd(ctx, "subs:due", redis.Z{Score: float64(sub.NextAttemptAt.Unix()), Member: sub.User})
+	billable := sub.Status == StatusActive || sub.Status == StatusPastDue
+	if billable {
+		// Pending one-time charges score at -inf so they always sort first
+		// in DueBefore — gets processed as soon as the scheduler can.
+		score := float64(sub.NextAttemptAt.Unix())
+		if sub.PendingChargeAtomic != "" {
+			score = 0
+		}
+		pipe.ZAdd(ctx, "subs:due", redis.Z{Score: score, Member: sub.User})
 	} else {
 		pipe.ZRem(ctx, "subs:due", sub.User)
 	}

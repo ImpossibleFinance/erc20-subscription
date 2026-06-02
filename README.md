@@ -142,31 +142,35 @@ Every event: HMAC-SHA256-signed body, header `X-Signature: <hex>`. Envelope:
 
 | `type` | When | `data` |
 |---|---|---|
-| `subscription.charged`        | A pull succeeded on-chain | `{user, plan_id, amount_atomic, period_count, period_unit, tx_hash, block, next_attempt}` |
-| `subscription.payment_failed` | Pull reverted; scheduler will retry per dunning policy | `{user, plan_id, amount_atomic, attempts, next_attempt, reason}` |
-| `subscription.cancelled`      | Dunning exhausted OR admin cancel | `{user, plan_id, reason}` |
-| `subscription.allowance_low`  | After a successful pull, remaining allowance covers fewer than `ALLOWANCE_LOW_MONTHS` more periods | `{user, plan_id, allowance_atomic, price_atomic, remaining_periods, threshold_periods}` |
+| `subscription.charged`            | A regular-cycle pull succeeded on-chain | `{user, plan_id, amount_atomic, period_count, period_unit, tx_hash, block, next_attempt}` |
+| `subscription.prorated_charge`    | A one-time pull succeeded (mid-cycle upgrade diff)      | `{user, plan_id, amount_atomic, tx_hash, block}` |
+| `subscription.payment_failed`     | A pull reverted; scheduler will retry per dunning policy | `{user, plan_id, amount_atomic, attempts, next_attempt, reason}` |
+| `subscription.cancelled`          | Dunning exhausted OR admin cancel                       | `{user, plan_id, reason}` |
+| `subscription.allowance_low`      | After a successful pull, remaining allowance covers fewer than `ALLOWANCE_LOW_MONTHS` more periods | `{user, plan_id, allowance_atomic, price_atomic, remaining_periods, threshold_periods}` |
+| `subscription.allowance_required` | New sub OR plan change — tells your app how much to prompt the user to approve | `{user, plan_id, required_allowance_atomic, current_allowance_atomic, top_up_atomic, recommended_periods, price_atomic, period_count, period_unit, prorated_charge_atomic?}` |
 
 5xx is retried up to 3× with linear backoff. 4xx is terminal.
 
 ### Upgrades / downgrades
 
-`POST /admin/subscriptions` is upsert — calling it again for the same `address` with a different `plan_id` swaps the plan:
+`POST /admin/subscriptions` is the single endpoint for new subs AND plan changes. The backend does the bookkeeping:
 
 ```jsonc
-// User upgrades from "pro" ($10) to "team" ($50) on 2026-06-01, mid-cycle:
-// → charge new price immediately
+// Mid-cycle upgrade from Pro ($10/mo) to Team ($50/mo):
 POST /admin/subscriptions
 { "address": "0x…", "plan_id": "team" }
-
-// → charge new price at end of currently-paid-for cycle
-POST /admin/subscriptions
-{ "address": "0x…", "plan_id": "team", "start_at": "2026-06-15T00:00:00Z" }
 ```
 
-Charge history (`last_charged_tx`, `last_charged_block`) is preserved across the swap.
+What happens on a plan change:
 
-**Allowance and upgrades:** the user's USDC allowance is on the contract, not the plan. If the user approved `12 × $10 = $120` for Pro and upgrades to Team ($50), only 2 more pulls fit before the allowance runs out. The next `subscription.allowance_low` webhook will fire as usual — your app prompts the user to re-approve a higher amount for the new tier.
+1. **Prorated diff is queued.** If the new plan costs more, the backend computes `(new_price − old_price) × remaining_cycle_fraction` and stashes it on the sub as a one-time charge. Example: 17 days left of a 31-day cycle, Pro → Team → diff ≈ $21.94 queued.
+2. **Plan is swapped.** `next_attempt_at` (the regular billing anchor) is unchanged — the user's cycle date stays consistent.
+3. **`subscription.allowance_required` webhook fires immediately.** Tells your app exactly how much USDC the user should approve to cover the new tier (12 periods + any pending diff). Your app prompts the user to call `USDC.approve(contract, required_allowance_atomic)`.
+4. **Once allowance covers it, the scheduler pulls the diff** and emits `subscription.prorated_charge`. Then the regular cycle continues on its existing anchor, charging the new price.
+
+Downgrades skip steps 1 and 4 (no refunds): just swap the plan, fire `allowance_required` so the user can shrink their approval if they want. The next cycle charges the lower price.
+
+Charge history (`last_charged_tx`, `last_charged_block`) is preserved across plan swaps.
 
 ---
 

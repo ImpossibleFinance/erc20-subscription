@@ -113,39 +113,93 @@ func (s *Scheduler) processOne(ctx context.Context, sub *store.Subscription) err
 		return s.markCancelled(ctx, sub, "plan_missing_or_inactive")
 	}
 
+	// If the sub has a pending one-time charge (e.g. prorated upgrade diff),
+	// settle that first. We don't advance NextAttemptAt here — the regular
+	// cycle continues on its existing anchor.
+	if sub.PendingChargeAtomic != "" {
+		return s.pullPending(ctx, sub, plan)
+	}
+
 	price, ok := new(big.Int).SetString(plan.PriceAtomic, 10)
 	if !ok {
 		return s.markCancelled(ctx, sub, "plan_price_invalid")
 	}
 
-	hash, err := s.chain.Pull(ctx, common.HexToAddress(sub.User), price)
+	hash, err := s.submitPull(ctx, sub, price)
 	if err != nil {
-		// Submission failure — likely insufficient allowance/balance
-		// surfaced as a gas-estimate revert, or a transient RPC issue.
-		// Either way, treat as a payment failure and let dunning decide.
+		if errors.Is(err, errInFlightSkip) {
+			return nil // tx submitted; receipt pending across ticks
+		}
 		return s.handleFailure(ctx, sub, plan, err)
 	}
-
-	// Record the in-flight hash BEFORE waiting for the receipt. If the wait
-	// is interrupted (process restart, ctx cancel), the next tick will
-	// resolve it via TransactionReceipt before submitting another pull.
-	sub.InFlightTx = hash.Hex()
-	if err := s.store.UpsertSubscription(ctx, sub); err != nil {
-		return fmt.Errorf("persist in-flight: %w", err)
-	}
-
 	receipt, err := s.chain.WaitReceipt(ctx, hash)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			// Don't clear InFlightTx — next tick will resolve.
 			return nil
 		}
-		// Tx reverted on-chain. WaitReceipt returns (receipt, err) here.
-		_ = receipt
+		return s.handleFailure(ctx, sub, plan, err)
+	}
+	return s.markCharged(ctx, sub, plan, hash, receipt.BlockNumber.Uint64())
+}
+
+var errInFlightSkip = errors.New("submitted; receipt pending")
+
+// submitPull packs a pull tx, persists InFlightTx, and returns the hash.
+// Common to regular cycle pulls and one-time pending charges.
+func (s *Scheduler) submitPull(ctx context.Context, sub *store.Subscription, amount *big.Int) (common.Hash, error) {
+	hash, err := s.chain.Pull(ctx, common.HexToAddress(sub.User), amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	sub.InFlightTx = hash.Hex()
+	if err := s.store.UpsertSubscription(ctx, sub); err != nil {
+		return hash, fmt.Errorf("persist in-flight: %w", err)
+	}
+	return hash, nil
+}
+
+// pullPending pulls the one-time charge stashed on the sub (a proration diff
+// from a plan change). On success we clear PendingChargeAtomic — the regular
+// cycle continues unchanged. On failure we dunning the sub like any other
+// payment problem.
+func (s *Scheduler) pullPending(ctx context.Context, sub *store.Subscription, plan *store.Plan) error {
+	amount, ok := new(big.Int).SetString(sub.PendingChargeAtomic, 10)
+	if !ok || amount.Sign() <= 0 {
+		// Invalid pending amount; clear it and continue normally next tick.
+		sub.PendingChargeAtomic = ""
+		return s.store.UpsertSubscription(ctx, sub)
+	}
+	hash, err := s.submitPull(ctx, sub, amount)
+	if err != nil {
+		return s.handleFailure(ctx, sub, plan, err)
+	}
+	receipt, err := s.chain.WaitReceipt(ctx, hash)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
 		return s.handleFailure(ctx, sub, plan, err)
 	}
 
-	return s.markCharged(ctx, sub, plan, hash, receipt.BlockNumber.Uint64())
+	sub.PendingChargeAtomic = ""
+	sub.LastChargedTx = hash.Hex()
+	sub.LastChargedBlock = receipt.BlockNumber.Uint64()
+	sub.LastChargedAt = s.now()
+	sub.InFlightTx = ""
+	if err := s.store.UpsertSubscription(ctx, sub); err != nil {
+		return err
+	}
+	if s.webhook != nil {
+		_ = s.webhook.Send(ctx, webhooks.EventProratedCharge, map[string]any{
+			"user":          sub.User,
+			"plan_id":       sub.PlanID,
+			"amount_atomic": amount.String(),
+			"tx_hash":       sub.LastChargedTx,
+			"block":         sub.LastChargedBlock,
+		})
+	}
+	s.maybeWarnAllowanceLow(ctx, sub, plan)
+	return nil
 }
 
 // resolveInFlight polls a previously-submitted tx hash. The store is updated
@@ -190,6 +244,7 @@ func (s *Scheduler) markCharged(ctx context.Context, sub *store.Subscription, pl
 	sub.LastError = ""
 	sub.LastChargedTx = hash.Hex()
 	sub.LastChargedBlock = block
+	sub.LastChargedAt = now
 	sub.InFlightTx = ""
 	if err := s.store.UpsertSubscription(ctx, sub); err != nil {
 		return err

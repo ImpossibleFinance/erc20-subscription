@@ -50,7 +50,12 @@ func main() {
 		TokenAddr:          common.HexToAddress(cfg.TokenAddr),
 		AllowanceLowMonths: cfg.AllowanceLowMonths,
 	})
-	a := api.New(rs, cfg.AdminToken)
+	a := api.New(rs, cfg.AdminToken, api.Deps{
+		Chain:              cc,
+		Webhook:            wh,
+		TokenAddr:          common.HexToAddress(cfg.TokenAddr),
+		AllowanceLowMonths: cfg.AllowanceLowMonths,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

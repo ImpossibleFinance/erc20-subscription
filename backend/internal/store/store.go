@@ -75,21 +75,38 @@ const (
 
 // Subscription is the backend's record of a recurring charge against a wallet.
 type Subscription struct {
-	User             string    // 0x address, lowercased
-	PlanID           string
-	Status           string    // active | past_due | cancelled
-	NextAttemptAt    time.Time // when the scheduler should next attempt a pull
-	DunningAttempts  int       // failed attempts in current cycle (0 when healthy)
+	User   string // 0x address, lowercased
+	PlanID string
+	Status string // active | past_due | cancelled
+
+	// NextAttemptAt drives the due-queue: the scheduler picks subs whose
+	// NextAttemptAt has passed. For a healthy active sub this is the next
+	// regular billing date.
+	NextAttemptAt time.Time
+
+	// LastChargedAt is when the most recent successful pull happened. Used
+	// to compute the fraction of cycle remaining for proration math.
+	LastChargedAt time.Time
+
+	// PendingChargeAtomic, when non-empty and > 0, is a one-time amount the
+	// scheduler must pull BEFORE the next regular cycle charge. Set by the
+	// API when a user upgrades plans mid-cycle (proration diff). Cleared on
+	// successful pull.
+	PendingChargeAtomic string
+
+	DunningAttempts  int
 	LastError        string
-	LastChargedTx    string    // tx hash of most recent successful pull
+	LastChargedTx    string
 	LastChargedBlock uint64
+
 	// InFlightTx is the hash of a submitted pull tx whose receipt we never
 	// confirmed (RPC timeout / context cancel). On next tick, the scheduler
 	// MUST poll this receipt before submitting another pull, to avoid
 	// double-charging if the original tx eventually mined.
 	InFlightTx string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Store is the persistence interface. Implementations must be safe for
@@ -104,6 +121,8 @@ type Store interface {
 	ListSubscriptions(ctx context.Context, status string) ([]*Subscription, error)
 
 	// DueBefore returns active or past_due subscriptions whose NextAttemptAt
-	// is at or before `t`, up to `limit`.
+	// is at or before `t`, OR which have a PendingChargeAtomic to settle,
+	// up to `limit`. Pending charges are always considered due so they get
+	// processed as soon as allowance allows.
 	DueBefore(ctx context.Context, t time.Time, limit int) ([]*Subscription, error)
 }
