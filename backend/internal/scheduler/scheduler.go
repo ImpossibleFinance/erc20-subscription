@@ -3,12 +3,15 @@
 // Each tick:
 //  1. resolve any in-flight tx from the previous tick (so we don't
 //     double-pull if a previous submission's receipt was lost),
-//  2. pull due subs synchronously: submit pull(), wait for receipt, update
-//     store + webhook on the result.
+//  2. pull due subs SEQUENTIALLY: submit pull(), wait for receipt, update
+//     store + webhook on the result, then the next sub.
 //
-// Single-loop, sequential — throughput is bounded by chain pacing anyway
-// (one operator nonce at a time), so adding parallelism mostly creates
-// nonce contention without buying anything.
+// Sequential is mandatory, not stylistic — the operator EOA has a single
+// nonce sequence. Two concurrent pull() submissions would either share a
+// nonce (one fails with "already known") or step on each other in the
+// mempool. The chain itself is the throughput bound, so single-threaded
+// is the right model. The only place we wait on the network in parallel
+// is webhook delivery, which doesn't touch the chain.
 package scheduler
 
 import (
@@ -29,35 +32,42 @@ import (
 )
 
 type Scheduler struct {
-	chain              *chain.Client
-	store              store.Store
-	policy             dunning.Policy
-	webhook            *webhooks.Sender
-	interval           time.Duration
-	batch              int
-	now                func() time.Time
-	tokenAddr          common.Address // ERC-20 we're pulling; needed for allowance checks
-	allowanceLowMonths int            // 0 disables the post-pull allowance warning
+	chain                   *chain.Client
+	store                   store.Store
+	policy                  dunning.Policy
+	webhook                 *webhooks.Sender
+	interval                time.Duration
+	batch                   int
+	now                     func() time.Time
+	tokenAddr               common.Address
+	allowanceLowMonths      int
+	operatorGasBufferMonths int           // warn when balance covers fewer than N months of upcoming pulls
+	operatorGasWarnInterval time.Duration // dedup window for the gas warning
+	lastGasWarnAt           time.Time
 }
 
 type Config struct {
-	Policy             dunning.Policy
-	Interval           time.Duration
-	TokenAddr          common.Address
-	AllowanceLowMonths int
+	Policy                  dunning.Policy
+	Interval                time.Duration
+	TokenAddr               common.Address
+	AllowanceLowMonths      int
+	OperatorGasBufferMonths int
+	OperatorGasWarnInterval time.Duration
 }
 
 func New(c *chain.Client, s store.Store, w *webhooks.Sender, cfg Config) *Scheduler {
 	return &Scheduler{
-		chain:              c,
-		store:              s,
-		policy:             cfg.Policy,
-		webhook:            w,
-		interval:           cfg.Interval,
-		batch:              25,
-		now:                func() time.Time { return time.Now().UTC() },
-		tokenAddr:          cfg.TokenAddr,
-		allowanceLowMonths: cfg.AllowanceLowMonths,
+		chain:                   c,
+		store:                   s,
+		policy:                  cfg.Policy,
+		webhook:                 w,
+		interval:                cfg.Interval,
+		batch:                   25,
+		now:                     func() time.Time { return time.Now().UTC() },
+		tokenAddr:               cfg.TokenAddr,
+		allowanceLowMonths:      cfg.AllowanceLowMonths,
+		operatorGasBufferMonths: cfg.OperatorGasBufferMonths,
+		operatorGasWarnInterval: cfg.OperatorGasWarnInterval,
 	}
 }
 
@@ -77,6 +87,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) Tick(ctx context.Context) error {
+	// Check operator gas first so a low-balance warning fires even on ticks
+	// where nothing is due.
+	s.maybeWarnOperatorGas(ctx)
+
 	due, err := s.store.DueBefore(ctx, s.now(), s.batch)
 	if err != nil {
 		return err
@@ -87,6 +101,88 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Gas-per-pull estimate. The Subscriptions.pull tx does one storage read
+// (operator check) and one ERC-20 transferFrom (~50-65k gas). 100k is a
+// conservative ceiling that survives most network conditions.
+const estimatedGasPerPull = 100_000
+
+// maybeWarnOperatorGas checks whether the operator's ETH balance covers at
+// least `operatorGasBufferMonths` of upcoming pulls at the current gas price,
+// and fires an `operator.gas_low` webhook if not. The threshold is computed
+// dynamically — there's no hardcoded wei value to keep in sync with usage.
+//
+// We don't HALT pulls when gas is low. If the threshold computation or RPC
+// is wrong, halting would cascade into spurious payment_failed events for
+// users. Better to warn loudly and let the admin top up.
+//
+// Rate-limited via operatorGasWarnInterval (default 6h) so a persistent
+// low-balance condition doesn't spam ops.
+func (s *Scheduler) maybeWarnOperatorGas(ctx context.Context) {
+	if s.operatorGasBufferMonths == 0 || s.webhook == nil {
+		return
+	}
+	if !s.lastGasWarnAt.IsZero() && s.now().Sub(s.lastGasWarnAt) < s.operatorGasWarnInterval {
+		return
+	}
+	threshold, pullsCount, err := s.computeGasThreshold(ctx)
+	if err != nil || threshold == nil {
+		// Couldn't compute — log but don't false-alarm.
+		if err != nil {
+			log.Printf("scheduler: gas threshold: %v", err)
+		}
+		return
+	}
+	bal, err := s.chain.Balance(ctx, s.chain.OperatorAddress())
+	if err != nil {
+		log.Printf("scheduler: operator balance: %v", err)
+		return
+	}
+	if bal.Cmp(threshold) >= 0 {
+		return
+	}
+	_ = s.webhook.Send(ctx, webhooks.EventOperatorGasLow, map[string]any{
+		"operator":         s.chain.OperatorAddress().Hex(),
+		"balance_wei":      bal.String(),
+		"threshold_wei":    threshold.String(),
+		"buffer_months":    s.operatorGasBufferMonths,
+		"pulls_in_horizon": pullsCount,
+	})
+	s.lastGasWarnAt = s.now()
+}
+
+// computeGasThreshold returns the wei amount needed to cover all pulls due
+// in the next `operatorGasBufferMonths` months, at current gas price, with a
+// 2× safety multiplier for gas-market spikes. Also returns the number of
+// pulls counted, for the webhook payload.
+func (s *Scheduler) computeGasThreshold(ctx context.Context) (*big.Int, int, error) {
+	horizon := s.now().AddDate(0, s.operatorGasBufferMonths, 0)
+	// DueBefore returns active+past_due subs whose NextAttemptAt ≤ horizon
+	// OR which have a pending one-time charge. That's our upper bound on
+	// pull count over the buffer window — assumes ~1 pull per sub, which is
+	// accurate for monthly plans (the common case). Short-period plans
+	// (daily/weekly) undercount; we lean on the 2× safety multiplier and
+	// document the assumption in the README.
+	subs, err := s.store.DueBefore(ctx, horizon, 100_000)
+	if err != nil {
+		return nil, 0, err
+	}
+	pulls := int64(len(subs))
+	if pulls == 0 {
+		// Even with zero subs, keep a small minimum so the operator has gas
+		// to cover the first signup that arrives. 10 pulls' worth.
+		pulls = 10
+	}
+
+	perGas, err := s.chain.EstimatedGasPricePerUnit(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	perPull := new(big.Int).Mul(big.NewInt(estimatedGasPerPull), perGas)
+	threshold := new(big.Int).Mul(perPull, big.NewInt(pulls))
+	threshold.Mul(threshold, big.NewInt(2)) // 2× safety for gas spikes
+	return threshold, int(pulls), nil
 }
 
 // processOne resolves an in-flight tx (if any) and then attempts a fresh pull
@@ -303,9 +399,26 @@ func (s *Scheduler) maybeWarnAllowanceLow(ctx context.Context, sub *store.Subscr
 
 func (s *Scheduler) handleFailure(ctx context.Context, sub *store.Subscription, plan *store.Plan, cause error) error {
 	now := s.now()
+	sub.InFlightTx = ""
+
+	// Operator-side errors (out of gas, RPC down, contract paused) are not
+	// the user's fault — don't dunning them. Back off a short interval so
+	// the next tick retries naturally once the admin tops up / fixes the
+	// problem. The admin is notified via the `operator.gas_low` webhook
+	// (forced now so they hear about it even mid-dedup window).
+	if isOperatorSideError(cause) {
+		log.Printf("scheduler: operator-side error for %s: %v", sub.User, cause)
+		s.maybeWarnOperatorGas(ctx)
+		sub.LastError = truncate(cause.Error(), 200)
+		// Keep Status active and DunningAttempts unchanged — this isn't
+		// the user's failure to dunning against. Retry in 5 minutes.
+		sub.NextAttemptAt = now.Add(5 * time.Minute)
+		return s.store.UpsertSubscription(ctx, sub)
+	}
+
+	// User-side error — dunning.
 	sub.DunningAttempts++
 	sub.LastError = truncate(cause.Error(), 200)
-	sub.InFlightTx = ""
 
 	next, ok := s.policy.NextRetry(sub.DunningAttempts, now)
 	if !ok {
@@ -319,15 +432,56 @@ func (s *Scheduler) handleFailure(ctx context.Context, sub *store.Subscription, 
 	}
 	if s.webhook != nil {
 		_ = s.webhook.Send(ctx, webhooks.EventPaymentFailed, map[string]any{
-			"user":           sub.User,
-			"plan_id":        sub.PlanID,
-			"amount_atomic":  plan.PriceAtomic,
-			"attempts":       sub.DunningAttempts,
-			"next_attempt":   sub.NextAttemptAt,
-			"reason":         sub.LastError,
+			"user":          sub.User,
+			"plan_id":       sub.PlanID,
+			"amount_atomic": plan.PriceAtomic,
+			"attempts":      sub.DunningAttempts,
+			"next_attempt":  sub.NextAttemptAt,
+			"reason":        sub.LastError,
 		})
 	}
 	return nil
+}
+
+// isOperatorSideError classifies a pull failure as "we / our infra screwed
+// up" vs "the user can't pay." Operator-side errors should never advance the
+// user's dunning counter or cancel their subscription.
+//
+// We match by error message because go-ethereum surfaces RPC errors as
+// strings; no typed sentinels. The patterns below cover:
+//   - operator EOA out of ETH (estimate + send)
+//   - gas market spikes that put our maxFee under the base fee
+//   - nonce mismatch (mid-flight rotation)
+//   - RPC infra hiccups
+//   - the contract being halted by the owner (operator==0)
+func isOperatorSideError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	patterns := []string{
+		"insufficient funds for gas",
+		"insufficient funds for transfer",
+		"max fee per gas less than block base fee",
+		"transaction underpriced",
+		"replacement transaction underpriced",
+		"nonce too low",
+		"nonce too high",
+		"gas required exceeds allowance",
+		"context deadline exceeded",
+		"connection refused",
+		"i/o timeout",
+		"no such host",
+		// Subscriptions contract: operator was rotated to 0 or the owner
+		// otherwise revoked us. Same effect as halted.
+		"notoperator",
+	}
+	for _, p := range patterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Scheduler) markCancelled(ctx context.Context, sub *store.Subscription, reason string) error {

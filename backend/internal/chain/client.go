@@ -52,6 +52,26 @@ func (c *Client) Pull(ctx context.Context, user common.Address, amount *big.Int)
 	return c.sendCall(ctx, "pull", user, amount)
 }
 
+// Balance returns the native ETH balance of `addr` in wei. Used by the
+// scheduler to detect when the operator's gas budget runs low.
+func (c *Client) Balance(ctx context.Context, addr common.Address) (*big.Int, error) {
+	return c.rpc.BalanceAt(ctx, addr, nil)
+}
+
+// EstimatedGasPricePerUnit returns the current (base fee + suggested tip) in
+// wei. Multiply by gas-units to get the wei cost of a tx at current prices.
+func (c *Client) EstimatedGasPricePerUnit(ctx context.Context) (*big.Int, error) {
+	head, err := c.rpc.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	tip, err := c.rpc.SuggestGasTipCap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return new(big.Int).Add(head.BaseFee, tip), nil
+}
+
 // Allowance returns the user's current ERC-20 allowance to `spender` on
 // `token`. Used by the scheduler to detect when a user is about to run out of
 // approved budget so we can warn them before pulls start failing.

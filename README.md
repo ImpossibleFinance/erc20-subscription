@@ -148,6 +148,7 @@ Every event: HMAC-SHA256-signed body, header `X-Signature: <hex>`. Envelope:
 | `subscription.cancelled`          | Dunning exhausted OR admin cancel                       | `{user, plan_id, reason}` |
 | `subscription.allowance_low`      | After a successful pull, remaining allowance covers fewer than `ALLOWANCE_LOW_MONTHS` more periods | `{user, plan_id, allowance_atomic, price_atomic, remaining_periods, threshold_periods}` |
 | `subscription.allowance_required` | New sub OR plan change — tells your app how much to prompt the user to approve | `{user, plan_id, required_allowance_atomic, current_allowance_atomic, top_up_atomic, recommended_periods, price_atomic, period_count, period_unit, prorated_charge_atomic?}` |
+| `operator.gas_low`                | Operator EOA's ETH balance dropped below `OPERATOR_GAS_LOW_WEI` — top it up before pulls start failing for lack of gas | `{operator, balance_wei, threshold_wei}` |
 
 5xx is retried up to 3× with linear backoff. 4xx is terminal.
 

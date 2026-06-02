@@ -45,10 +45,12 @@ func main() {
 
 	wh := webhooks.NewSender(cfg.WebhookURL, cfg.WebhookSecret)
 	sched := scheduler.New(cc, rs, wh, scheduler.Config{
-		Policy:             dunning.Policy{Backoffs: cfg.DunningBackoffs},
-		Interval:           cfg.TickInterval,
-		TokenAddr:          common.HexToAddress(cfg.TokenAddr),
-		AllowanceLowMonths: cfg.AllowanceLowMonths,
+		Policy:                  dunning.Policy{Backoffs: cfg.DunningBackoffs},
+		Interval:                cfg.TickInterval,
+		TokenAddr:               common.HexToAddress(cfg.TokenAddr),
+		AllowanceLowMonths:      cfg.AllowanceLowMonths,
+		OperatorGasBufferMonths: cfg.OperatorGasBufferMonths,
+		OperatorGasWarnInterval: cfg.OperatorGasWarnInterval,
 	})
 	a := api.New(rs, cfg.AdminToken, api.Deps{
 		Chain:              cc,

@@ -43,6 +43,18 @@ type Config struct {
 	// to re-approve before pulls start failing. 0 disables the check.
 	AllowanceLowMonths int
 
+	// OperatorGasBufferMonths: warn (via `operator.gas_low` webhook) when
+	// the operator EOA's ETH balance won't cover at least this many more
+	// months of upcoming pulls at current gas prices. Computed dynamically
+	// from the active sub count + chain head — no static wei threshold to
+	// keep in sync with usage. Default: 1. 0 disables the check.
+	OperatorGasBufferMonths int
+
+	// OperatorGasWarnInterval: dedup window for the gas-low webhook. While
+	// the balance stays below threshold we re-fire at most once per
+	// interval. Default: 6h.
+	OperatorGasWarnInterval time.Duration
+
 	// HTTP server.
 	ListenAddr string
 
@@ -82,6 +94,17 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("ALLOWANCE_LOW_MONTHS: %w", err)
 	}
 	cfg.AllowanceLowMonths = low
+
+	buf, err := strconv.Atoi(getenv("OPERATOR_GAS_BUFFER_MONTHS", "1"))
+	if err != nil {
+		return nil, fmt.Errorf("OPERATOR_GAS_BUFFER_MONTHS: %w", err)
+	}
+	cfg.OperatorGasBufferMonths = buf
+	warnInt, err := time.ParseDuration(getenv("OPERATOR_GAS_WARN_INTERVAL", "6h"))
+	if err != nil {
+		return nil, fmt.Errorf("OPERATOR_GAS_WARN_INTERVAL: %w", err)
+	}
+	cfg.OperatorGasWarnInterval = warnInt
 
 	if cfg.RPCURL == "" || cfg.ContractAddr == "" || cfg.TokenAddr == "" || cfg.OperatorKeyHex == "" ||
 		cfg.RedisURL == "" || cfg.AdminToken == "" {

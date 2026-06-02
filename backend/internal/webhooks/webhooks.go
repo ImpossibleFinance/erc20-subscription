@@ -24,6 +24,9 @@ const (
 	EventAllowanceLow      = "subscription.allowance_low"
 	EventAllowanceRequired = "subscription.allowance_required"
 	EventProratedCharge    = "subscription.prorated_charge"
+
+	// Operational events — for the admin / ops team, not for end users.
+	EventOperatorGasLow = "operator.gas_low"
 )
 
 type Event struct {
