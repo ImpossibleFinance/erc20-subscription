@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Subscribe</title>
+  <style>
+    :root {
+      --bg: #0b0b0e;
+      --card: #15151a;
+      --border: #2a2a31;
+      --text: #f5f5f5;
+      --muted: #8a8a93;
+      --accent: #6c8cff;
+      --error: #ff6b6b;
+      --success: #4ade80;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0; min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      display: flex; align-items: center; justify-content: center;
+    }
+    main { width: 100%; max-width: 460px; padding: 32px 24px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+    p { color: var(--muted); margin: 0 0 20px; font-size: 14px; line-height: 1.5; }
+    .plans { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+    .plan {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      cursor: pointer;
+      display: flex; justify-content: space-between; align-items: center;
+      transition: border-color .1s;
+    }
+    .plan:hover { border-color: var(--muted); }
+    .plan.selected { border-color: var(--accent); background: rgba(108,140,255,0.06); }
+    .plan-name { font-weight: 600; font-size: 15px; }
+    .plan-price { color: var(--muted); font-size: 13px; }
+    button {
+      width: 100%; padding: 14px;
+      background: var(--accent); color: white;
+      border: 0; border-radius: 8px;
+      font-size: 15px; font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    button:hover { opacity: 0.92; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status {
+      margin-top: 16px; padding: 12px 14px;
+      border-radius: 8px; font-size: 13px; line-height: 1.5;
+      border: 1px solid var(--border);
+    }
+    .status.error { border-color: var(--error); color: var(--error); }
+    .status.success { border-color: var(--success); color: var(--success); }
+    .row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--muted); margin-top: 12px; }
+    code { font-family: ui-monospace, SF Mono, monospace; color: var(--text); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>Subscribe</h1>
+      <p>Approve <span id="approvalAmount">—</span> on the payment token. Future charges are pulled automatically; cancel anytime by revoking the approval.</p>
+      <div class="plans" id="plans">
+        <div style="color: var(--muted); font-size: 13px; padding: 8px;">Loading plans…</div>
+      </div>
+      <button id="cta" disabled>Connect wallet</button>
+      <div class="row">
+        <span>Network</span>
+        <code id="networkLabel">—</code>
+      </div>
+      <div id="status"></div>
+    </div>
+  </main>
+
+  <script type="module">
+    // ─── EDIT THIS CONFIG BLOCK ─────────────────────────────────────────
+    const CONFIG = {
+      // The Subscriptions contract you deployed. See contracts/src/Subscriptions.sol.
+      contractAddress: "0x0000000000000000000000000000000000000000",
+
+      // The ERC-20 the contract pulls. Must match the contract's immutable `token()`.
+      // Default below: USDC on Base mainnet.
+      tokenAddress:   "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      tokenSymbol:    "USDC",
+      tokenDecimals:  6,
+
+      // Chain the contract lives on. 8453 = Base mainnet, 84532 = Base Sepolia.
+      chainId:       8453,
+      chainName:     "Base",
+      rpcURL:        "https://mainnet.base.org",
+      blockExplorer: "https://basescan.org",
+
+      // Where this widget fetches plans. The subscription backend exposes a
+      // public CORS-open GET /plans you can hit directly, OR your own backend
+      // can proxy it. Either works.
+      plansURL: "https://subs.your-domain.example/plans",
+
+      // Where the widget POSTs after the user approves on-chain. This MUST be
+      // YOUR backend, not the subscription backend's admin endpoint — your
+      // backend authenticates the user, then forwards to subs-backend's
+      // POST /admin/subscriptions with your ADMIN_TOKEN.
+      //
+      // Expected request body:
+      //   { plan_id, address, approval_tx_hash }
+      // Expected response: 2xx on success, error body on failure.
+      subscribeURL: "/api/subscribe",
+
+      // Number of plan periods to recommend the user approve. Defaults to 12
+      // so a user signs once per year. Should match the backend's
+      // recommended_periods so allowance_required doesn't fire immediately.
+      approvePeriods: 12,
+    }
+    // ────────────────────────────────────────────────────────────────────
+
+    const $ = (id) => document.getElementById(id)
+    const fmt = (atomic) => (Number(atomic) / 10 ** CONFIG.tokenDecimals).toFixed(2)
+
+    let plans = []
+    let selected = null
+    let userAddress = null
+
+    function setStatus(msg, kind = "") {
+      const el = $("status")
+      if (!msg) { el.innerHTML = ""; return }
+      el.innerHTML = `<div class="status ${kind}">${msg}</div>`
+    }
+
+    function renderPlans() {
+      const root = $("plans")
+      root.innerHTML = ""
+      if (!plans.length) {
+        root.innerHTML = `<div style="color: var(--muted); font-size: 13px; padding: 8px;">No active plans.</div>`
+        return
+      }
+      for (const p of plans) {
+        if (!p.active) continue
+        const div = document.createElement("div")
+        div.className = "plan" + (selected?.id === p.id ? " selected" : "")
+        div.innerHTML = `
+          <span class="plan-name">${p.id}</span>
+          <span class="plan-price">${CONFIG.tokenSymbol} ${fmt(p.price_atomic)} / ${p.period_count} ${p.period_unit}${p.period_count > 1 ? "s" : ""}</span>
+        `
+        div.onclick = () => { selected = p; renderPlans(); updateCTA() }
+        root.appendChild(div)
+      }
+    }
+
+    function updateCTA() {
+      const cta = $("cta")
+      if (!selected) {
+        cta.textContent = "Select a plan"
+        cta.disabled = true
+        $("approvalAmount").textContent = "—"
+        return
+      }
+      const approvalAtomic = BigInt(selected.price_atomic) * BigInt(CONFIG.approvePeriods)
+      $("approvalAmount").textContent = `${CONFIG.tokenSymbol} ${fmt(approvalAtomic.toString())}`
+      if (!userAddress) {
+        cta.textContent = "Connect wallet"
+        cta.disabled = false
+      } else {
+        cta.textContent = `Approve & subscribe to ${selected.id}`
+        cta.disabled = false
+      }
+    }
+
+    async function fetchPlans() {
+      try {
+        const r = await fetch(CONFIG.plansURL)
+        if (!r.ok) throw new Error(`plans: HTTP ${r.status}`)
+        const body = await r.json()
+        plans = body.plans || []
+        renderPlans()
+      } catch (e) {
+        setStatus(`Failed to load plans: ${e.message}`, "error")
+      }
+    }
+
+    // Minimal ABI encoding for the only two calls we need: approve + cancel.
+    // Avoids a bundler / dependency entirely.
+    function pad32(hex) { return hex.replace(/^0x/, "").padStart(64, "0") }
+    function encodeApprove(spender, amount) {
+      // selector for approve(address,uint256) = 0x095ea7b3
+      return "0x095ea7b3"
+        + pad32(spender.toLowerCase())
+        + pad32(BigInt(amount).toString(16))
+    }
+
+    async function ensureChain() {
+      const hex = "0x" + CONFIG.chainId.toString(16)
+      const current = await window.ethereum.request({ method: "eth_chainId" })
+      if (current === hex) return
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: hex }],
+        })
+      } catch (err) {
+        if (err.code === 4902) {
+          // Chain not added to wallet yet — add it.
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: hex,
+              chainName: CONFIG.chainName,
+              rpcUrls: [CONFIG.rpcURL],
+              blockExplorerUrls: [CONFIG.blockExplorer],
+              nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+            }],
+          })
+        } else { throw err }
+      }
+    }
+
+    async function connect() {
+      if (!window.ethereum) {
+        setStatus("No wallet detected. Install MetaMask, Rabby, or Coinbase Wallet to continue.", "error")
+        return
+      }
+      try {
+        const [acct] = await window.ethereum.request({ method: "eth_requestAccounts" })
+        userAddress = acct
+        await ensureChain()
+        $("networkLabel").textContent = `${CONFIG.chainName} (${CONFIG.chainId})`
+        setStatus("")
+        updateCTA()
+      } catch (e) {
+        setStatus(e.message || "Failed to connect wallet", "error")
+      }
+    }
+
+    async function approveAndSubscribe() {
+      if (!selected || !userAddress) return
+      const cta = $("cta")
+      cta.disabled = true
+      try {
+        await ensureChain()
+        const amount = BigInt(selected.price_atomic) * BigInt(CONFIG.approvePeriods)
+
+        // 1. USDC.approve(contract, amount) — wallet popup #1
+        cta.textContent = "Confirm in your wallet…"
+        const data = encodeApprove(CONFIG.contractAddress, amount)
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [{ from: userAddress, to: CONFIG.tokenAddress, data }],
+        })
+
+        // 2. Wait for the approve to land
+        cta.textContent = "Waiting for confirmation…"
+        await waitForReceipt(txHash)
+
+        // 3. Tell YOUR backend (which forwards to subs-backend with admin token)
+        cta.textContent = "Activating subscription…"
+        const r = await fetch(CONFIG.subscribeURL, {
+          method: "POST",
+          credentials: "include", // send your app's session cookie
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            plan_id: selected.id,
+            address: userAddress,
+            approval_tx_hash: txHash,
+          }),
+        })
+        if (!r.ok) {
+          const err = await r.text()
+          throw new Error(`Subscribe failed: ${err}`)
+        }
+
+        setStatus(`Subscribed to ${selected.id}. <a href="${CONFIG.blockExplorer}/tx/${txHash}" target="_blank" style="color: inherit;">View approval ↗</a>`, "success")
+        cta.textContent = "Subscribed"
+      } catch (e) {
+        const msg = e.message || String(e)
+        if (msg.includes("User denied") || msg.includes("rejected")) {
+          setStatus("Approval cancelled.", "error")
+        } else {
+          setStatus(msg, "error")
+        }
+        cta.disabled = false
+        updateCTA()
+      }
+    }
+
+    async function waitForReceipt(hash, timeoutMs = 90_000) {
+      const start = Date.now()
+      while (Date.now() - start < timeoutMs) {
+        const r = await window.ethereum.request({
+          method: "eth_getTransactionReceipt",
+          params: [hash],
+        })
+        if (r) {
+          if (r.status === "0x0") throw new Error("Approval reverted")
+          return r
+        }
+        await new Promise(res => setTimeout(res, 2000))
+      }
+      throw new Error("Approval not confirmed within 90s")
+    }
+
+    $("cta").onclick = () => {
+      if (!userAddress) connect()
+      else approveAndSubscribe()
+    }
+
+    fetchPlans()
+  </script>
+</body>
+</html>

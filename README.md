@@ -224,6 +224,10 @@ await walletClient.writeContract({
 
 The Subscribed step lives entirely on your backend — call `POST /admin/subscriptions` after authenticating the user.
 
+### Drop-in checkout page
+
+`templates/checkout/index.html` is a self-contained, zero-build static page you can host under your own domain (S3, Vercel, GitHub Pages, an `/checkout` route in your existing app). Edit the config block at the top — contract address, token, chain, `subscribeURL` pointing at your own backend — and you're done. Works with MetaMask, Rabby, Coinbase Wallet, Frame, and any other extension wallet via `window.ethereum`. See `templates/checkout/README.md` for the integration contract.
+
 ---
 
 ## Security checklist (prod)
