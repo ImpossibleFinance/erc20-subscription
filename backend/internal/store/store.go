@@ -18,12 +18,12 @@ import (
 // that an integrator who picks "1 month" doesn't drift relative to the
 // calendar over a year.
 type Plan struct {
-	ID          string // human id like "pro_monthly"
-	PriceAtomic string // token smallest unit, base-10 string (USDC has 6 decimals)
-	PeriodCount uint32
-	PeriodUnit  string // "day" | "month" | "year"
-	Active      bool
-	CreatedAt   time.Time
+	ID          string    `json:"id"`           // human id like "pro_monthly"
+	PriceAtomic string    `json:"price_atomic"` // token smallest unit, base-10 string (USDC has 6 decimals)
+	PeriodCount uint32    `json:"period_count"`
+	PeriodUnit  string    `json:"period_unit"` // "day" | "month" | "year"
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // ValidPeriodUnit reports whether u is one of the supported unit values.
@@ -75,38 +75,38 @@ const (
 
 // Subscription is the backend's record of a recurring charge against a wallet.
 type Subscription struct {
-	User   string // 0x address, lowercased
-	PlanID string
-	Status string // active | past_due | cancelled
+	User   string `json:"user"`    // 0x address, lowercased
+	PlanID string `json:"plan_id"`
+	Status string `json:"status"` // active | past_due | cancelled
 
 	// NextAttemptAt drives the due-queue: the scheduler picks subs whose
 	// NextAttemptAt has passed. For a healthy active sub this is the next
 	// regular billing date.
-	NextAttemptAt time.Time
+	NextAttemptAt time.Time `json:"next_attempt_at"`
 
 	// LastChargedAt is when the most recent successful pull happened. Used
 	// to compute the fraction of cycle remaining for proration math.
-	LastChargedAt time.Time
+	LastChargedAt time.Time `json:"last_charged_at,omitempty"`
 
 	// PendingChargeAtomic, when non-empty and > 0, is a one-time amount the
 	// scheduler must pull BEFORE the next regular cycle charge. Set by the
 	// API when a user upgrades plans mid-cycle (proration diff). Cleared on
 	// successful pull.
-	PendingChargeAtomic string
+	PendingChargeAtomic string `json:"pending_charge_atomic,omitempty"`
 
-	DunningAttempts  int
-	LastError        string
-	LastChargedTx    string
-	LastChargedBlock uint64
+	DunningAttempts  int    `json:"dunning_attempts"`
+	LastError        string `json:"last_error,omitempty"`
+	LastChargedTx    string `json:"last_charged_tx,omitempty"`
+	LastChargedBlock uint64 `json:"last_charged_block,omitempty"`
 
 	// InFlightTx is the hash of a submitted pull tx whose receipt we never
 	// confirmed (RPC timeout / context cancel). On next tick, the scheduler
 	// MUST poll this receipt before submitting another pull, to avoid
 	// double-charging if the original tx eventually mined.
-	InFlightTx string
+	InFlightTx string `json:"in_flight_tx,omitempty"`
 
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Store is the persistence interface. Implementations must be safe for
