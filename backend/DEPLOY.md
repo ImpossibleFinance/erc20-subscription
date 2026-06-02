@@ -5,8 +5,9 @@ built by the included `Dockerfile`; deploy it on whatever container host
 you already use (Fly.io, Cloud Run, ECS, k8s, a plain VM with systemd —
 the binary doesn't care).
 
-This document is hosting-agnostic. For ifhost-specific or k8s-specific
-recipes, layer them on top.
+This document is hosting-agnostic. For platform-specific recipes
+(k8s manifests, Cloud Run YAML, fly.toml, systemd units), layer them
+on top.
 
 ## What you need before starting
 
