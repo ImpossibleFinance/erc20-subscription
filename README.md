@@ -244,7 +244,7 @@ The Subscribed step lives entirely on your backend — call `POST /admin/subscri
 - [ ] Integrator's `/api/subscribe` route has **CSRF protection** (Origin/Referer check, SameSite cookie, or anti-CSRF token) — the checkout template sends credentials.
 
 ### Deployment
-- [ ] **Single scheduler instance only.** Multiple backend processes will both submit pulls and step on the operator's nonce. There's no distributed lock today. Run one replica; use a process manager (systemd, k8s `replicas: 1` with `strategy: Recreate`) to enforce it.
+- [ ] **Multi-replica deployments are safe.** The scheduler claims a Redis-backed tick lock (`scheduler:tick`) before doing any chain work, heartbeats it every 10s, and releases at the end. Other replicas sit idle until the leader dies or a tick takes too long, at which point the lock TTL (30s) expires and another instance takes over. The operator EOA's single nonce sequence is always driven by one process at a time.
 - [ ] **Redis with AOF** (`appendonly yes`, `appendfsync everysec`). RDB-only loses recent state on crash, and without `LastChargedAt` the scheduler can re-pull a sub the contract just charged.
 - [ ] **Redis replication / backups.** If Redis dies for good, you lose sub state; on-chain pulls would resume from "first cycle" semantics, which is wrong.
 - [ ] **Public read endpoints behind a rate limiter** (Cloudflare, nginx) — `GET /plans` and `/subscriptions/{addr}` are CORS-open and unauthenticated.

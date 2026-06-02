@@ -35,6 +35,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("redis: %v", err)
 	}
+	// Shared Redis client → store + scheduler tick-lock.
+	locker := store.NewRedisLocker(rs.Client())
 
 	cc, err := chain.New(ctx, cfg.RPCURL, cfg.ContractAddr, cfg.ChainID, cfg.OperatorKeyHex)
 	if err != nil {
@@ -51,7 +53,9 @@ func main() {
 		AllowanceLowMonths:      cfg.AllowanceLowMonths,
 		OperatorGasBufferMonths: cfg.OperatorGasBufferMonths,
 		OperatorGasWarnInterval: cfg.OperatorGasWarnInterval,
+		Locker:                  locker,
 	})
+	log.Printf("scheduler instance: %s", sched.InstanceID())
 	a := api.New(rs, cfg.AdminToken, api.Deps{
 		Chain:              cc,
 		Webhook:            wh,

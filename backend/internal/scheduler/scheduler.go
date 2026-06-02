@@ -16,6 +16,8 @@ package scheduler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -32,9 +34,30 @@ import (
 	"github.com/impossiblefinance/erc20-subscription/backend/internal/webhooks"
 )
 
+// generateInstanceID returns a per-process identifier used as the lock
+// holder ID. Different replicas get different IDs so the locker can
+// distinguish them on takeover.
+func generateInstanceID() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return "sched-" + hex.EncodeToString(b[:])
+}
+
+const (
+	// Lock key everyone contends for. Single value across the cluster.
+	tickLockKey = "scheduler:tick"
+	// TTL on the lock — must be longer than a normal tick. A stuck pull can
+	// take submitTotalBudget (10 min) so we set the TTL well above that and
+	// rely on the heartbeat to extend it.
+	tickLockTTL = 30 * time.Second
+	// How often the heartbeat extends the lock. Must be < tickLockTTL.
+	tickLockRenew = 10 * time.Second
+)
+
 type Scheduler struct {
 	chain                   *chain.Client
 	store                   store.Store
+	locker                  Locker
 	policy                  dunning.Policy
 	webhook                 *webhooks.Sender
 	interval                time.Duration
@@ -45,6 +68,7 @@ type Scheduler struct {
 	operatorGasBufferMonths int           // warn when balance covers fewer than N months of upcoming pulls
 	operatorGasWarnInterval time.Duration // dedup window for the gas warning
 	lastGasWarnAt           time.Time
+	instanceID              string
 }
 
 type Config struct {
@@ -54,12 +78,21 @@ type Config struct {
 	AllowanceLowMonths      int
 	OperatorGasBufferMonths int
 	OperatorGasWarnInterval time.Duration
+	// Locker arbitrates which scheduler instance runs each tick. Pass
+	// scheduler.NoOpLocker{} for single-instance dev. In multi-replica
+	// deployments, pass a RedisLocker — it's mandatory because the operator
+	// EOA has a single nonce sequence and parallel pulls would conflict.
+	Locker Locker
 }
 
 func New(c *chain.Client, s store.Store, w *webhooks.Sender, cfg Config) *Scheduler {
+	if cfg.Locker == nil {
+		cfg.Locker = NoOpLocker{}
+	}
 	return &Scheduler{
 		chain:                   c,
 		store:                   s,
+		locker:                  cfg.Locker,
 		policy:                  cfg.Policy,
 		webhook:                 w,
 		interval:                cfg.Interval,
@@ -69,8 +102,13 @@ func New(c *chain.Client, s store.Store, w *webhooks.Sender, cfg Config) *Schedu
 		allowanceLowMonths:      cfg.AllowanceLowMonths,
 		operatorGasBufferMonths: cfg.OperatorGasBufferMonths,
 		operatorGasWarnInterval: cfg.OperatorGasWarnInterval,
+		instanceID:              generateInstanceID(),
 	}
 }
+
+// InstanceID returns the random per-process ID this scheduler uses to claim
+// the tick lock. Exposed for log/debug correlation.
+func (s *Scheduler) InstanceID() string { return s.instanceID }
 
 func (s *Scheduler) Run(ctx context.Context) {
 	t := time.NewTicker(s.interval)
@@ -88,6 +126,31 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) Tick(ctx context.Context) error {
+	// Cluster-wide mutex: only one scheduler instance does chain work at a
+	// time. Sharing the operator EOA's nonce sequence across replicas would
+	// cause "nonce too low" / "already known" / replacement-underpriced
+	// errors and risk double-submitting pulls.
+	acquired, err := s.locker.Acquire(ctx, tickLockKey, s.instanceID, tickLockTTL)
+	if err != nil {
+		return fmt.Errorf("acquire tick lock: %w", err)
+	}
+	if !acquired {
+		return nil // another replica is processing this tick
+	}
+	defer func() {
+		if err := s.locker.Release(ctx, tickLockKey, s.instanceID); err != nil {
+			log.Printf("scheduler: release lock: %v", err)
+		}
+	}()
+
+	// Heartbeat the lock for the duration of the tick. If we lose it
+	// (TTL expired and another instance grabbed it), bail out so we don't
+	// step on the new leader.
+	hbCtx, cancelHB := context.WithCancel(ctx)
+	defer cancelHB()
+	lockLost := make(chan struct{}, 1)
+	go s.heartbeatLock(hbCtx, lockLost)
+
 	// Check operator gas first so a low-balance warning fires even on ticks
 	// where nothing is due.
 	s.maybeWarnOperatorGas(ctx)
@@ -97,11 +160,43 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		return err
 	}
 	for _, sub := range due {
+		select {
+		case <-lockLost:
+			log.Printf("scheduler: lock lost mid-tick, stopping")
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err := s.processOne(ctx, sub); err != nil {
 			log.Printf("scheduler: user=%s: %v", sub.User, err)
 		}
 	}
 	return nil
+}
+
+// heartbeatLock extends the tick lock's TTL every tickLockRenew while the
+// tick is in progress. If Renew ever signals we lost the lock (i.e. another
+// instance grabbed it after a TTL expiry), we publish on lockLost so Tick
+// can bail out before stepping on the new leader's nonce.
+func (s *Scheduler) heartbeatLock(ctx context.Context, lockLost chan<- struct{}) {
+	t := time.NewTicker(tickLockRenew)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := s.locker.Renew(ctx, tickLockKey, s.instanceID, tickLockTTL); err != nil {
+				log.Printf("scheduler: heartbeat: %v", err)
+				select {
+				case lockLost <- struct{}{}:
+				default:
+				}
+				return
+			}
+		}
+	}
 }
 
 // Gas-per-pull estimate. The Subscriptions.pull tx does one storage read

@@ -27,8 +27,17 @@ func NewRedis(url string) (*RedisStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse redis url: %w", err)
 	}
-	return &RedisStore{r: redis.NewClient(opts)}, nil
+	return NewRedisFromClient(redis.NewClient(opts)), nil
 }
+
+// NewRedisFromClient lets the caller share a single *redis.Client between
+// the store, the scheduler lock, and any other Redis-backed primitives.
+func NewRedisFromClient(r *redis.Client) *RedisStore { return &RedisStore{r: r} }
+
+// Client returns the underlying Redis client, for callers that need to
+// construct adjacent primitives (locker, rate limiter, etc.) against the
+// same connection pool.
+func (s *RedisStore) Client() *redis.Client { return s.r }
 
 // ---------- plans ----------
 
