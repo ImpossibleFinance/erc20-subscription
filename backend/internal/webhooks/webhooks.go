@@ -26,7 +26,8 @@ const (
 	EventProratedCharge    = "subscription.prorated_charge"
 
 	// Operational events — for the admin / ops team, not for end users.
-	EventOperatorGasLow = "operator.gas_low"
+	EventOperatorGasLow  = "operator.gas_low"
+	EventOperatorTxStuck = "operator.tx_stuck"
 )
 
 type Event struct {

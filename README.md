@@ -148,7 +148,8 @@ Every event: HMAC-SHA256-signed body, header `X-Signature: <hex>`. Envelope:
 | `subscription.cancelled`          | Dunning exhausted OR admin cancel                       | `{user, plan_id, reason}` |
 | `subscription.allowance_low`      | After a successful pull, remaining allowance covers fewer than `ALLOWANCE_LOW_MONTHS` more periods | `{user, plan_id, allowance_atomic, price_atomic, remaining_periods, threshold_periods}` |
 | `subscription.allowance_required` | New sub OR plan change — tells your app how much to prompt the user to approve | `{user, plan_id, required_allowance_atomic, current_allowance_atomic, top_up_atomic, recommended_periods, price_atomic, period_count, period_unit, prorated_charge_atomic?}` |
-| `operator.gas_low`                | Operator EOA's ETH balance dropped below `OPERATOR_GAS_LOW_WEI` — top it up before pulls start failing for lack of gas | `{operator, balance_wei, threshold_wei}` |
+| `operator.gas_low`                | Operator EOA's ETH balance won't cover at least `OPERATOR_GAS_BUFFER_MONTHS` more months of pulls at current gas — top it up | `{operator, balance_wei, threshold_wei, buffer_months, pulls_in_horizon}` |
+| `operator.tx_stuck`               | A pull tx didn't mine within the budget (10 min, 5 fee bumps) — operator nonce is pinned; admin must inspect | `{operator, user, plan_id, in_flight_tx, reason}` |
 
 5xx is retried up to 3× with linear backoff. 4xx is terminal.
 
@@ -172,6 +173,26 @@ What happens on a plan change:
 Downgrades skip steps 1 and 4 (no refunds): just swap the plan, fire `allowance_required` so the user can shrink their approval if they want. The next cycle charges the lower price.
 
 Charge history (`last_charged_tx`, `last_charged_block`) is preserved across plan swaps.
+
+### Stuck transactions
+
+The operator EOA has a single nonce sequence — only one pull tx in flight at a time. The submitter does NOT blindly bump fees on every timeout. After each 60-second wait without a receipt, it asks one specific question:
+
+> Has the chain's current `baseFee` or `suggestedTip` risen above what we paid?
+
+- **Yes** (we underbid) → double the tip, recompute `maxFeePerGas`, resubmit at the same nonce.
+- **No** (our fee is still competitive) → just keep waiting. The tx is fine; the network is slow, the sequencer is congested, or the mempool is moving slow. Bumping here would burn gas for nothing.
+
+Bumping is **exponential** (2× per retry) and **capped at 5 active bumps** with a **10-minute total wall-clock budget per pull**. After either cap, the backend gives up and emits `operator.tx_stuck` with the tx hash so the admin can investigate. No more pulls run until the stuck tx clears or the admin rotates the operator key.
+
+### Operator-side vs user-side failures
+
+The scheduler classifies pull errors:
+
+- **User-side** (insufficient allowance, blocked transfer, etc.): standard dunning — `subscription.payment_failed` webhook, retry at 24h → 72h → 168h, then `subscription.cancelled`.
+- **Operator-side** (out of gas, RPC outage, contract paused, nonce mismatch): no dunning, `DunningAttempts` is NOT incremented. Sub backs off 5 minutes and retries. The admin sees `operator.gas_low` / `operator.tx_stuck` instead.
+
+This keeps users from being cancelled because *we* dropped the ball.
 
 ---
 

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/impossiblefinance/erc20-subscription/backend/internal/chain"
 	"github.com/impossiblefinance/erc20-subscription/backend/internal/dunning"
@@ -221,37 +222,44 @@ func (s *Scheduler) processOne(ctx context.Context, sub *store.Subscription) err
 		return s.markCancelled(ctx, sub, "plan_price_invalid")
 	}
 
-	hash, err := s.submitPull(ctx, sub, price)
-	if err != nil {
-		if errors.Is(err, errInFlightSkip) {
-			return nil // tx submitted; receipt pending across ticks
-		}
-		return s.handleFailure(ctx, sub, plan, err)
-	}
-	receipt, err := s.chain.WaitReceipt(ctx, hash)
+	receipt, err := s.submitAndWait(ctx, sub, price)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil
+			return nil // resume next tick via InFlightTx
+		}
+		if errors.Is(err, chain.ErrTxStuck) {
+			s.emitTxStuck(ctx, sub, err)
+			return nil // sub stays as-is; admin must intervene
 		}
 		return s.handleFailure(ctx, sub, plan, err)
 	}
-	return s.markCharged(ctx, sub, plan, hash, receipt.BlockNumber.Uint64())
+	return s.markCharged(ctx, sub, plan, common.HexToHash(sub.InFlightTx), receipt.BlockNumber.Uint64())
 }
 
-var errInFlightSkip = errors.New("submitted; receipt pending")
+// submitAndWait runs the bump-aware submitter and persists InFlightTx after
+// every broadcast so a restart can resolve in-flight state.
+func (s *Scheduler) submitAndWait(ctx context.Context, sub *store.Subscription, amount *big.Int) (*types.Receipt, error) {
+	return s.chain.SubmitPull(ctx, common.HexToAddress(sub.User), amount, func(h common.Hash) error {
+		sub.InFlightTx = h.Hex()
+		return s.store.UpsertSubscription(ctx, sub)
+	})
+}
 
-// submitPull packs a pull tx, persists InFlightTx, and returns the hash.
-// Common to regular cycle pulls and one-time pending charges.
-func (s *Scheduler) submitPull(ctx context.Context, sub *store.Subscription, amount *big.Int) (common.Hash, error) {
-	hash, err := s.chain.Pull(ctx, common.HexToAddress(sub.User), amount)
-	if err != nil {
-		return common.Hash{}, err
+// emitTxStuck logs and emits the operator.tx_stuck webhook so ops know a
+// pull is pinned in the mempool. The operator's nonce is held until this tx
+// resolves; no further pulls can proceed.
+func (s *Scheduler) emitTxStuck(ctx context.Context, sub *store.Subscription, cause error) {
+	log.Printf("scheduler: tx stuck for user=%s: %v", sub.User, cause)
+	if s.webhook == nil {
+		return
 	}
-	sub.InFlightTx = hash.Hex()
-	if err := s.store.UpsertSubscription(ctx, sub); err != nil {
-		return hash, fmt.Errorf("persist in-flight: %w", err)
-	}
-	return hash, nil
+	_ = s.webhook.Send(ctx, webhooks.EventOperatorTxStuck, map[string]any{
+		"operator":     s.chain.OperatorAddress().Hex(),
+		"user":         sub.User,
+		"plan_id":      sub.PlanID,
+		"in_flight_tx": sub.InFlightTx,
+		"reason":       cause.Error(),
+	})
 }
 
 // pullPending pulls the one-time charge stashed on the sub (a proration diff
@@ -265,20 +273,20 @@ func (s *Scheduler) pullPending(ctx context.Context, sub *store.Subscription, pl
 		sub.PendingChargeAtomic = ""
 		return s.store.UpsertSubscription(ctx, sub)
 	}
-	hash, err := s.submitPull(ctx, sub, amount)
-	if err != nil {
-		return s.handleFailure(ctx, sub, plan, err)
-	}
-	receipt, err := s.chain.WaitReceipt(ctx, hash)
+	receipt, err := s.submitAndWait(ctx, sub, amount)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		if errors.Is(err, chain.ErrTxStuck) {
+			s.emitTxStuck(ctx, sub, err)
 			return nil
 		}
 		return s.handleFailure(ctx, sub, plan, err)
 	}
 
 	sub.PendingChargeAtomic = ""
-	sub.LastChargedTx = hash.Hex()
+	sub.LastChargedTx = sub.InFlightTx
 	sub.LastChargedBlock = receipt.BlockNumber.Uint64()
 	sub.LastChargedAt = s.now()
 	sub.InFlightTx = ""

@@ -46,10 +46,14 @@ func (c *Client) OperatorAddress() common.Address { return c.opAddr }
 func (c *Client) Contract() common.Address        { return c.contract }
 func (c *Client) RPC() *ethclient.Client          { return c.rpc }
 
-// Pull calls Subscriptions.pull(user, amount). Returns the tx hash; the caller
-// should wait for receipt to confirm. Reverts are surfaced as errors.
-func (c *Client) Pull(ctx context.Context, user common.Address, amount *big.Int) (common.Hash, error) {
-	return c.sendCall(ctx, "pull", user, amount)
+// SubmitPull wraps SubmitAndWait for the Subscriptions.pull(user, amount)
+// call. Handles bump-and-replace on stuck txs (only when fees are actually
+// underbid). Returns the receipt or ErrTxStuck.
+//
+// `onSubmit` is invoked with each broadcast tx hash so the scheduler can
+// persist InFlightTx for crash recovery.
+func (c *Client) SubmitPull(ctx context.Context, user common.Address, amount *big.Int, onSubmit func(common.Hash) error) (*types.Receipt, error) {
+	return c.SubmitAndWait(ctx, "pull", []interface{}{user, amount}, onSubmit)
 }
 
 // Balance returns the native ETH balance of `addr` in wei. Used by the
@@ -89,51 +93,6 @@ func (c *Client) Allowance(ctx context.Context, token, owner, spender common.Add
 		return nil, fmt.Errorf("unpack allowance: %w", err)
 	}
 	return out[0].(*big.Int), nil
-}
-
-func (c *Client) sendCall(ctx context.Context, method string, args ...interface{}) (common.Hash, error) {
-	data, err := SubscriptionsABI.Pack(method, args...)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
-	}
-
-	nonce, err := c.rpc.PendingNonceAt(ctx, c.opAddr)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("pending nonce: %w", err)
-	}
-	tip, err := c.rpc.SuggestGasTipCap(ctx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("gas tip: %w", err)
-	}
-	head, err := c.rpc.HeaderByNumber(ctx, nil)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("head: %w", err)
-	}
-	maxFee := new(big.Int).Add(new(big.Int).Mul(head.BaseFee, big.NewInt(2)), tip)
-
-	msg := ethereum.CallMsg{From: c.opAddr, To: &c.contract, Data: data}
-	gas, err := c.rpc.EstimateGas(ctx, msg)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("estimate %s: %w", method, err)
-	}
-
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   c.chainID,
-		Nonce:     nonce,
-		GasTipCap: tip,
-		GasFeeCap: maxFee,
-		Gas:       gas,
-		To:        &c.contract,
-		Data:      data,
-	})
-	signed, err := types.SignTx(tx, types.LatestSignerForChainID(c.chainID), c.opKey)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("sign: %w", err)
-	}
-	if err := c.rpc.SendTransaction(ctx, signed); err != nil {
-		return common.Hash{}, fmt.Errorf("send: %w", err)
-	}
-	return signed.Hash(), nil
 }
 
 // WaitReceipt polls until the tx is mined and returns its receipt. Returns
