@@ -623,7 +623,7 @@ func (a *API) forceCompleteSession(w http.ResponseWriter, r *http.Request) {
 
 // ---------- webhooks ----------
 
-func (a *API) emitSessionCompleted(ctx context.Context, sess *store.CheckoutSession, sub *store.Subscription, plan *store.Plan, at time.Time, recovered bool) {
+func (a *API) emitSessionCompleted(_ context.Context, sess *store.CheckoutSession, sub *store.Subscription, plan *store.Plan, at time.Time, recovered bool) {
 	if a.webhook == nil {
 		return
 	}
@@ -640,14 +640,19 @@ func (a *API) emitSessionCompleted(ctx context.Context, sess *store.CheckoutSess
 	if recovered {
 		data["recovered_by"] = "operator"
 	}
+	// Detach from the request context — the goroutine outlives the HTTP
+	// response and the request's ctx is cancelled the instant we write it,
+	// silently killing the webhook send.
 	go func() {
-		if err := a.webhook.Send(ctx, webhooks.EventSessionCompleted, data); err != nil {
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := a.webhook.Send(bg, webhooks.EventSessionCompleted, data); err != nil {
 			log.Printf("webhook %s: %v", webhooks.EventSessionCompleted, err)
 		}
 	}()
 }
 
-func (a *API) emitSubscriptionReplaced(ctx context.Context, sess *store.CheckoutSession, old, new *store.Subscription) {
+func (a *API) emitSubscriptionReplaced(_ context.Context, sess *store.CheckoutSession, old, new *store.Subscription) {
 	if a.webhook == nil {
 		return
 	}
@@ -661,7 +666,9 @@ func (a *API) emitSubscriptionReplaced(ctx context.Context, sess *store.Checkout
 		"metadata":              sess.Metadata,
 	}
 	go func() {
-		if err := a.webhook.Send(ctx, webhooks.EventSubscriptionReplaced, data); err != nil {
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := a.webhook.Send(bg, webhooks.EventSubscriptionReplaced, data); err != nil {
 			log.Printf("webhook %s: %v", webhooks.EventSubscriptionReplaced, err)
 		}
 	}()
