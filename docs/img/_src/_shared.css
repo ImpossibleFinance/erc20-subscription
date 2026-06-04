@@ -1,0 +1,36 @@
+/* Shared design tokens for checkout/popup screenshots
+   Stripe Checkout-style: light, near-white, restrained indigo accent. */
+:root {
+  --bg: #f6f9fc;
+  --bg-grad-top: #f6f9fc;
+  --bg-grad-bottom: #ffffff;
+  --card: #ffffff;
+  --card-2: #ffffff;
+  --border: #e6ebf1;
+  --border-strong: #d8dee5;
+  --accent: #635bff;
+  --accent-hover: #524bd6;
+  --text: #1a1f36;
+  --text-dim: #3c4257;
+  --text-faint: #697386;
+  --ok: #0a8c5c;
+  --ok-bg: #e3f6ed;
+  --ok-border: #b9e6cf;
+  --shadow-card: 0 7px 14px rgba(50,50,93,0.10), 0 3px 6px rgba(0,0,0,0.08);
+  --shadow-popup: 0 15px 35px rgba(50,50,93,0.15), 0 5px 15px rgba(0,0,0,0.07);
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>complete</title>
+<link rel="stylesheet" href="_shared.css">
+<style>
+  body {
+    width: 1200px;
+    height: 800px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(180deg, var(--bg-grad-top) 0%, var(--bg-grad-bottom) 100%);
+  }
+
+  .frame {
+    width: 460px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: var(--shadow-card);
+  }
+
+  .success-strip {
+    background: var(--ok-bg);
+    border-bottom: 1px solid var(--ok-border);
+    color: var(--ok);
+    padding: 12px 40px;
+    font-size: 13px;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .success-strip .check {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--ok);
+    color: #ffffff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .body {
+    padding: 32px 40px 32px;
+  }
+
+  .wordmark {
+    margin-bottom: 28px;
+    color: var(--text-faint);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    font-family: var(--mono);
+  }
+
+  .heading {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  .subhead {
+    color: var(--text-faint);
+    font-size: 14px;
+    margin: 0 0 24px;
+    line-height: 1.5;
+  }
+
+  .receipt {
+    border-top: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  .receipt .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13.5px;
+  }
+  .receipt .k {
+    color: var(--text-faint);
+    font-weight: 400;
+  }
+  .receipt .v {
+    color: var(--text);
+    font-weight: 500;
+    text-align: right;
+  }
+  .receipt .v.mono {
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+
+  .links {
+    text-align: center;
+  }
+  .link {
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 500;
+    text-decoration: none;
+  }
+  .link:hover { text-decoration: underline; }
+
+  .footer {
+    margin-top: 24px;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+  }
+  .footer .dot { margin: 0 8px; color: #c1c9d2; }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <div class="success-strip">
+      <span class="check">&#10003;</span>
+      <span>Subscribed &mdash; first month sent</span>
+    </div>
+    <div class="body">
+      <div class="wordmark">erc20-subscription</div>
+
+      <h1 class="heading">Payment received</h1>
+      <p class="subhead">Your Pro subscription is active. Next charge on 2026-07-03.</p>
+
+      <div class="receipt">
+        <div class="row">
+          <span class="k">Plan</span>
+          <span class="v">Pro</span>
+        </div>
+        <div class="row">
+          <span class="k">Charged</span>
+          <span class="v">49.00 USDC</span>
+        </div>
+        <div class="row">
+          <span class="k">Transaction</span>
+          <span class="v mono">0xDEADBEEF&hellip;DEADBEEF</span>
+        </div>
+        <div class="row">
+          <span class="k">Next charge</span>
+          <span class="v">Jul 3, 2026</span>
+        </div>
+      </div>
+
+      <div class="links">
+        <a class="link" href="#">View transaction &rarr;</a>
+      </div>
+
+      <div class="footer">
+        Powered by erc20-subscription <span class="dot">&middot;</span> Base Sepolia
+      </div>
+    </div>
+  </div>
+</body>
+</html>

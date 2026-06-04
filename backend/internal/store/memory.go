@@ -10,15 +10,19 @@ import (
 
 // MemoryStore is an in-memory Store for tests and local dev. Not durable.
 type MemoryStore struct {
-	mu    sync.RWMutex
-	plans map[string]*Plan
-	subs  map[string]*Subscription // key = lowercased address
+	mu       sync.RWMutex
+	plans    map[string]*Plan
+	subs     map[string]*Subscription   // key = lowercased address
+	sessions map[string]*CheckoutSession
+	txOwners map[string]string // key = lowercased tx hash, value = session id (reservation)
 }
 
 func NewMemory() *MemoryStore {
 	return &MemoryStore{
-		plans: make(map[string]*Plan),
-		subs:  make(map[string]*Subscription),
+		plans:    make(map[string]*Plan),
+		subs:     make(map[string]*Subscription),
+		sessions: make(map[string]*CheckoutSession),
+		txOwners: make(map[string]string),
 	}
 }
 
@@ -84,6 +88,72 @@ func (m *MemoryStore) ListSubscriptions(_ context.Context, status string) ([]*Su
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].User < out[j].User })
 	return out, nil
+}
+
+// ---------- sessions ----------
+
+func (m *MemoryStore) CreateSession(_ context.Context, s *CheckoutSession) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *s
+	m.sessions[s.ID] = &cp
+	return nil
+}
+
+func (m *MemoryStore) GetSession(_ context.Context, id string) (*CheckoutSession, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if s, ok := m.sessions[id]; ok {
+		cp := *s
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (m *MemoryStore) CompleteSession(_ context.Context, id, wallet, transferTx, approvalTx, subscriptionID string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if sess.Status != SessionStatusPending {
+		return ErrSessionNotPending
+	}
+	hash := strings.ToLower(transferTx)
+	if owner, taken := m.txOwners[hash]; taken && owner != id {
+		return ErrTxAlreadyConsumed
+	}
+	completed := at
+	sess.Status = SessionStatusCompleted
+	sess.Wallet = strings.ToLower(wallet)
+	sess.InitialTransferTx = hash
+	sess.ApprovalTxHash = strings.ToLower(approvalTx)
+	sess.SubscriptionID = subscriptionID
+	sess.CompletedAt = &completed
+	m.txOwners[hash] = id
+	return nil
+}
+
+func (m *MemoryStore) ExpireSessionsBefore(_ context.Context, t time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, s := range m.sessions {
+		if s.Status == SessionStatusPending && !s.ExpiresAt.After(t) {
+			s.Status = SessionStatusExpired
+			// Release any tx reservation; an expired-without-verify session
+			// shouldn't permanently block a hash (extraordinarily unlikely
+			// to matter, but matches the spec).
+			if s.InitialTransferTx != "" {
+				if owner := m.txOwners[s.InitialTransferTx]; owner == s.ID {
+					delete(m.txOwners, s.InitialTransferTx)
+				}
+			}
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (m *MemoryStore) DueBefore(_ context.Context, t time.Time, limit int) ([]*Subscription, error) {

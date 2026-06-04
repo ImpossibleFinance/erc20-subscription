@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>popup-approve</title>
+<link rel="stylesheet" href="_shared.css">
+<style>
+  body {
+    width: 720px;
+    height: 640px;
+    margin: 0;
+    position: relative;
+    background: linear-gradient(180deg, var(--bg-grad-top) 0%, var(--bg-grad-bottom) 100%);
+  }
+
+  /* Very faded hint of the checkout page behind the overlay */
+  .page-hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.35;
+    filter: blur(2px);
+  }
+  .page-hint .ghost-card {
+    width: 320px;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    box-shadow: var(--shadow-card);
+  }
+  .page-hint .ghost-line {
+    height: 10px;
+    background: #eef1f5;
+    border-radius: 3px;
+    margin-bottom: 12px;
+  }
+  .page-hint .ghost-line.w70 { width: 70%; }
+  .page-hint .ghost-line.w90 { width: 90%; }
+  .page-hint .ghost-line.w50 { width: 50%; }
+
+  .overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(26, 31, 54, 0.40);
+  }
+
+  .wrap {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .popup {
+    width: 440px;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: var(--shadow-popup);
+    font-family: var(--sans);
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 22px 24px 14px;
+  }
+  .header h1 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.005em;
+  }
+  .header .close {
+    color: var(--text-faint);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .subhead {
+    padding: 0 24px 16px;
+    color: var(--text-faint);
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+
+  .fields {
+    padding: 0 24px;
+    border-top: 1px solid var(--border);
+  }
+  .field {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13.5px;
+  }
+  .field:last-child { border-bottom: none; }
+  .field .k {
+    color: var(--text-faint);
+    font-weight: 400;
+  }
+  .field .v {
+    color: var(--text);
+    font-weight: 500;
+    text-align: right;
+  }
+  .field .v .mono {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .field .v .tag {
+    display: block;
+    color: var(--text-faint);
+    font-size: 12px;
+    font-weight: 400;
+    margin-top: 2px;
+  }
+  .field .v .amount {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 24px 20px;
+    border-top: 1px solid var(--border);
+  }
+  .reject {
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 8px 4px;
+  }
+  .reject:hover { color: var(--text); }
+  .confirm {
+    background: var(--accent);
+    color: #ffffff;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 6px;
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    cursor: pointer;
+  }
+  .confirm:hover { background: var(--accent-hover); }
+
+  .footnote {
+    padding: 0 24px 18px;
+    color: var(--text-faint);
+    font-size: 11.5px;
+    line-height: 1.5;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="page-hint">
+    <div class="ghost-card">
+      <div class="ghost-line w50"></div>
+      <div class="ghost-line w90"></div>
+      <div class="ghost-line w70"></div>
+      <div class="ghost-line w90"></div>
+      <div class="ghost-line w50"></div>
+    </div>
+  </div>
+  <div class="overlay"></div>
+
+  <div class="wrap">
+    <div class="popup">
+      <div class="header">
+        <h1>Confirm transaction</h1>
+        <span class="close">&times;</span>
+      </div>
+      <div class="subhead">Your wallet is asking to approve.</div>
+
+      <div class="fields">
+        <div class="field">
+          <span class="k">Contract</span>
+          <span class="v">USDC<span class="tag">ERC-20</span></span>
+        </div>
+        <div class="field">
+          <span class="k">Method</span>
+          <span class="v"><span class="mono">approve(spender, amount)</span></span>
+        </div>
+        <div class="field">
+          <span class="k">Spender</span>
+          <span class="v"><span class="mono">0xC0DE&hellip;C0DE</span><span class="tag">Subscriptions</span></span>
+        </div>
+        <div class="field">
+          <span class="k">Amount</span>
+          <span class="v"><span class="amount">540.00 USDC</span><span class="tag">~12 &times; monthly price</span></span>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="reject">Reject</button>
+        <button class="confirm">Confirm</button>
+      </div>
+
+      <div class="footnote">Skipped when your existing allowance already covers.</div>
+    </div>
+  </div>
+</body>
+</html>

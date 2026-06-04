@@ -25,6 +25,11 @@ const (
 	EventAllowanceRequired = "subscription.allowance_required"
 	EventProratedCharge    = "subscription.prorated_charge"
 
+	// Hosted-checkout lifecycle events. Emitted by the sessions API; see
+	// docs/checkout-sessions.md.
+	EventSessionCompleted    = "session.completed"
+	EventSubscriptionReplaced = "subscription.replaced"
+
 	// Operational events — for the admin / ops team, not for end users.
 	EventOperatorGasLow  = "operator.gas_low"
 	EventOperatorTxStuck = "operator.tx_stuck"

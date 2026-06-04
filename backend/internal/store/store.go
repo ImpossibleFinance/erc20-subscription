@@ -112,6 +112,9 @@ type Subscription struct {
 // Store is the persistence interface. Implementations must be safe for
 // concurrent use.
 type Store interface {
+	// SessionStore — hosted-checkout sessions; see sessions.go.
+	SessionStore
+
 	UpsertPlan(ctx context.Context, p *Plan) error
 	GetPlan(ctx context.Context, id string) (*Plan, error)
 	ListPlans(ctx context.Context) ([]*Plan, error)

@@ -43,25 +43,67 @@ type API struct {
 	webhook            *webhooks.Sender
 	adminToken         string
 	tokenAddr          common.Address
+	treasuryAddr       common.Address
+	tokenSymbol        string
+	tokenDecimals      uint8
 	allowanceLowMonths int
-	now                func() time.Time
+
+	// Checkout-sessions config (see docs/checkout-sessions.md). Zero values
+	// fall back to safe defaults but the production path should always wire
+	// these from internal/config.
+	challengePrefix    string
+	challengeFreshness time.Duration
+	sessionTTL         time.Duration
+	minConfirmations   uint64
+	approvePeriodsHint int
+
+	now func() time.Time
 }
 
 type Deps struct {
 	Chain              *chain.Client
 	Webhook            *webhooks.Sender
 	TokenAddr          common.Address
+	TreasuryAddr       common.Address
+	TokenSymbol        string
+	TokenDecimals      uint8
 	AllowanceLowMonths int
+
+	ChallengePrefix    string
+	ChallengeFreshness time.Duration
+	SessionTTL         time.Duration
+	MinConfirmations   uint64
+	ApprovePeriodsHint int
 }
 
 func New(s store.Store, adminToken string, d Deps) *API {
+	if d.ChallengePrefix == "" {
+		d.ChallengePrefix = "erc20-subscription checkout"
+	}
+	if d.ChallengeFreshness == 0 {
+		d.ChallengeFreshness = 10 * time.Minute
+	}
+	if d.SessionTTL == 0 {
+		d.SessionTTL = 15 * time.Minute
+	}
+	if d.ApprovePeriodsHint == 0 {
+		d.ApprovePeriodsHint = 12
+	}
 	return &API{
 		store:              s,
 		chain:              d.Chain,
 		webhook:            d.Webhook,
 		adminToken:         adminToken,
 		tokenAddr:          d.TokenAddr,
+		treasuryAddr:       d.TreasuryAddr,
+		tokenSymbol:        d.TokenSymbol,
+		tokenDecimals:      d.TokenDecimals,
 		allowanceLowMonths: d.AllowanceLowMonths,
+		challengePrefix:    d.ChallengePrefix,
+		challengeFreshness: d.ChallengeFreshness,
+		sessionTTL:         d.SessionTTL,
+		minConfirmations:   d.MinConfirmations,
+		approvePeriodsHint: d.ApprovePeriodsHint,
 		now:                func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -81,6 +123,17 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /admin/subscriptions", a.requireAdmin(http.HandlerFunc(a.listSubs)))
 	mux.Handle("POST /admin/subscriptions/{address}/cancel", a.requireAdmin(http.HandlerFunc(a.cancelSub)))
 
+	// Hosted-checkout sessions. Public read + complete; admin mint +
+	// force-complete. See docs/checkout-sessions.md.
+	mux.Handle("POST /admin/sessions", a.requireAdmin(http.HandlerFunc(a.createSession)))
+	mux.Handle("POST /admin/sessions/{id}/force_complete", a.requireAdmin(http.HandlerFunc(a.forceCompleteSession)))
+	mux.Handle("GET /sessions/{id}", a.cors(http.HandlerFunc(a.getSession)))
+	mux.Handle("GET /sessions/{id}/status", a.cors(http.HandlerFunc(a.getSessionStatus)))
+	mux.Handle("POST /sessions/{id}/complete", a.corsPost(http.HandlerFunc(a.completeSession)))
+	mux.Handle("OPTIONS /sessions/{id}", a.cors(http.HandlerFunc(noop)))
+	mux.Handle("OPTIONS /sessions/{id}/status", a.cors(http.HandlerFunc(noop)))
+	mux.Handle("OPTIONS /sessions/{id}/complete", a.corsPost(http.HandlerFunc(noop)))
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -92,6 +145,18 @@ func (a *API) cors(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		h.ServeHTTP(w, r)
+	})
+}
+
+// corsPost mirrors cors but allows POST. Used by the public checkout-session
+// `/complete` endpoint, which the page submits cross-origin.
+func (a *API) corsPost(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 		h.ServeHTTP(w, r)
