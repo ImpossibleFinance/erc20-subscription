@@ -56,11 +56,35 @@ func main() {
 		Locker:                  locker,
 	})
 	log.Printf("scheduler instance: %s", sched.InstanceID())
+
+	// Resolve treasury + token metadata from the contract / token at boot.
+	// Treasury is the destination the hosted-checkout page tells the user to
+	// send the first month's funds to; reading from the contract avoids an
+	// env var drifting out of sync with the immutable.
+	treasuryAddr, err := cc.Treasury(ctx)
+	if err != nil {
+		log.Fatalf("read treasury from contract: %v", err)
+	}
+	log.Printf("treasury address: %s", treasuryAddr.Hex())
+	tokenSym, tokenDec, err := cc.TokenInfo(ctx, common.HexToAddress(cfg.TokenAddr))
+	if err != nil {
+		log.Printf("token info read failed (continuing with defaults): %v", err)
+		tokenSym, tokenDec = "USDC", 6
+	}
+
 	a := api.New(rs, cfg.AdminToken, api.Deps{
 		Chain:              cc,
 		Webhook:            wh,
 		TokenAddr:          common.HexToAddress(cfg.TokenAddr),
+		TreasuryAddr:       treasuryAddr,
+		TokenSymbol:        tokenSym,
+		TokenDecimals:      tokenDec,
 		AllowanceLowMonths: cfg.AllowanceLowMonths,
+		ChallengePrefix:    cfg.ChallengePrefix,
+		ChallengeFreshness: cfg.ChallengeFreshness,
+		SessionTTL:         cfg.SessionTTL,
+		MinConfirmations:   uint64(cfg.MinConfirmations),
+		ApprovePeriodsHint: cfg.ApprovePeriodsHint,
 	})
 
 	srv := &http.Server{
@@ -70,6 +94,7 @@ func main() {
 	}
 
 	go sched.Run(ctx)
+	go a.RunSessionSweeper(ctx, cfg.SessionSweepInterval)
 	go func() {
 		log.Printf("HTTP listening on %s", cfg.ListenAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

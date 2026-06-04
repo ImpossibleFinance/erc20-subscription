@@ -60,6 +60,14 @@ type Config struct {
 
 	// Admin token — required header value for /admin/* routes.
 	AdminToken string
+
+	// Hosted-checkout sessions (see docs/checkout-sessions.md).
+	SessionTTL          time.Duration // lifetime of a pending session; clamped [5m, 60m]
+	ChallengeFreshness  time.Duration // max age of the EIP-191 `Issued:` line
+	MinConfirmations    int           // block depth required before accepting a tx
+	ChallengePrefix     string        // first line of the EIP-191 message; integrator-brandable
+	ApprovePeriodsHint  int           // how many periods the page is told to target on approve (default 12)
+	SessionSweepInterval time.Duration // how often to expire pending sessions past TTL
 }
 
 func Load() (*Config, error) {
@@ -110,6 +118,52 @@ func Load() (*Config, error) {
 		cfg.RedisURL == "" || cfg.AdminToken == "" {
 		return nil, errors.New("missing required env: RPC_URL, CONTRACT_ADDR, TOKEN_ADDR, OPERATOR_KEY_HEX, REDIS_URL, ADMIN_TOKEN")
 	}
+
+	sessTTL, err := time.ParseDuration(getenv("SESSION_TTL", "15m"))
+	if err != nil {
+		return nil, fmt.Errorf("SESSION_TTL: %w", err)
+	}
+	if sessTTL < 5*time.Minute {
+		sessTTL = 5 * time.Minute
+	}
+	if sessTTL > 60*time.Minute {
+		sessTTL = 60 * time.Minute
+	}
+	cfg.SessionTTL = sessTTL
+
+	chFresh, err := time.ParseDuration(getenv("CHALLENGE_FRESHNESS", "10m"))
+	if err != nil {
+		return nil, fmt.Errorf("CHALLENGE_FRESHNESS: %w", err)
+	}
+	cfg.ChallengeFreshness = chFresh
+
+	// Default confirmations: 1 on common testnets, 3 elsewhere. Operators
+	// pick the explicit value via env for anything serious.
+	defaultConfs := "3"
+	switch cfg.ChainID {
+	case 84532, 11155111, 421614, 11155420: // base-sepolia, eth-sepolia, arb-sepolia, op-sepolia
+		defaultConfs = "1"
+	}
+	confs, err := strconv.Atoi(getenv("MIN_CONFIRMATIONS", defaultConfs))
+	if err != nil {
+		return nil, fmt.Errorf("MIN_CONFIRMATIONS: %w", err)
+	}
+	cfg.MinConfirmations = confs
+
+	cfg.ChallengePrefix = getenv("CHALLENGE_PREFIX", "erc20-subscription checkout")
+
+	hint, err := strconv.Atoi(getenv("APPROVE_PERIODS_HINT", "12"))
+	if err != nil {
+		return nil, fmt.Errorf("APPROVE_PERIODS_HINT: %w", err)
+	}
+	cfg.ApprovePeriodsHint = hint
+
+	sweep, err := time.ParseDuration(getenv("SESSION_SWEEP_INTERVAL", "1m"))
+	if err != nil {
+		return nil, fmt.Errorf("SESSION_SWEEP_INTERVAL: %w", err)
+	}
+	cfg.SessionSweepInterval = sweep
+
 	return cfg, nil
 }
 

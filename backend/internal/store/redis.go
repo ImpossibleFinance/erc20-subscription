@@ -13,13 +13,16 @@ import (
 
 // RedisStore persists state to Redis. Schema:
 //
-//	plan:<id>            HASH (json)
-//	plans                SET   (plan IDs)
-//	sub:<address>        HASH (json)
-//	subs:<status>        SET  (addresses)
-//	subs:due             ZSET (member=address, score=NextAttemptAt unix)
+//	plan:<id>            STRING (json)
+//	plans                SET    (plan IDs)
+//	sub:<address>        STRING (json)
+//	subs:<status>        SET    (addresses)
+//	subs:due             ZSET   (member=address, score=NextAttemptAt unix)
+//	session:<id>         STRING (json)
+//	sessions:expiring    ZSET   (member=session id, score=ExpiresAt unix; pending only)
+//	tx:<txHash>          STRING (session id that owns this transfer hash)
 //
-// All addresses are stored lowercase; callers must normalize at the edge.
+// All addresses + tx hashes are stored lowercase; callers must normalize.
 type RedisStore struct{ r *redis.Client }
 
 func NewRedis(url string) (*RedisStore, error) {
@@ -159,6 +162,175 @@ func (s *RedisStore) ListSubscriptions(ctx context.Context, status string) ([]*S
 		}
 	}
 	return out, nil
+}
+
+// ---------- sessions ----------
+
+func (s *RedisStore) CreateSession(ctx context.Context, sess *CheckoutSession) error {
+	b, err := json.Marshal(sess)
+	if err != nil {
+		return err
+	}
+	pipe := s.r.TxPipeline()
+	pipe.Set(ctx, "session:"+sess.ID, b, 0)
+	if sess.Status == SessionStatusPending {
+		pipe.ZAdd(ctx, "sessions:expiring", redis.Z{
+			Score:  float64(sess.ExpiresAt.Unix()),
+			Member: sess.ID,
+		})
+	}
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (s *RedisStore) GetSession(ctx context.Context, id string) (*CheckoutSession, error) {
+	raw, err := s.r.Get(ctx, "session:"+id).Bytes()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var sess CheckoutSession
+	if err := json.Unmarshal(raw, &sess); err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
+// CompleteSession is a CAS via Redis WATCH. It atomically checks the session
+// is pending, that no OTHER session owns this transfer-tx hash, then writes
+// the completed session + reserves the tx hash + drops the session from the
+// expiring index. Concurrent callers retry on the WATCH race.
+func (s *RedisStore) CompleteSession(ctx context.Context, id, wallet, transferTx, approvalTx, subscriptionID string, at time.Time) error {
+	hash := strings.ToLower(transferTx)
+	sessionKey := "session:" + id
+	txKey := "tx:" + hash
+
+	for attempt := 0; attempt < 5; attempt++ {
+		err := s.r.Watch(ctx, func(tx *redis.Tx) error {
+			rawSess, err := tx.Get(ctx, sessionKey).Bytes()
+			if err == redis.Nil {
+				return ErrSessionNotFound
+			}
+			if err != nil {
+				return err
+			}
+			var sess CheckoutSession
+			if err := json.Unmarshal(rawSess, &sess); err != nil {
+				return err
+			}
+			if sess.Status != SessionStatusPending {
+				return ErrSessionNotPending
+			}
+
+			owner, err := tx.Get(ctx, txKey).Result()
+			if err != nil && err != redis.Nil {
+				return err
+			}
+			if err != redis.Nil && owner != id {
+				return ErrTxAlreadyConsumed
+			}
+
+			completed := at
+			sess.Status = SessionStatusCompleted
+			sess.Wallet = strings.ToLower(wallet)
+			sess.InitialTransferTx = hash
+			sess.ApprovalTxHash = strings.ToLower(approvalTx)
+			sess.SubscriptionID = subscriptionID
+			sess.CompletedAt = &completed
+
+			updated, err := json.Marshal(&sess)
+			if err != nil {
+				return err
+			}
+			_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
+				p.Set(ctx, sessionKey, updated, 0)
+				p.Set(ctx, txKey, id, 0)
+				p.ZRem(ctx, "sessions:expiring", id)
+				return nil
+			})
+			return err
+		}, sessionKey, txKey)
+
+		if err == redis.TxFailedErr {
+			continue // WATCH race; retry
+		}
+		return err
+	}
+	return redis.TxFailedErr
+}
+
+func (s *RedisStore) ExpireSessionsBefore(ctx context.Context, t time.Time) (int, error) {
+	ids, err := s.r.ZRangeByScore(ctx, "sessions:expiring", &redis.ZRangeBy{
+		Min:   "-inf",
+		Max:   strconv.FormatInt(t.Unix(), 10),
+		Count: 1000,
+	}).Result()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		// Read-modify-write under WATCH per id, so we don't race a concurrent
+		// CompleteSession.
+		err := s.r.Watch(ctx, func(tx *redis.Tx) error {
+			rawSess, err := tx.Get(ctx, "session:"+id).Bytes()
+			if err == redis.Nil {
+				// Vanished — drop from the index and move on.
+				_, _ = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
+					p.ZRem(ctx, "sessions:expiring", id)
+					return nil
+				})
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			var sess CheckoutSession
+			if err := json.Unmarshal(rawSess, &sess); err != nil {
+				return err
+			}
+			if sess.Status != SessionStatusPending {
+				// Completed or already-expired sessions just drop from the
+				// expiring index; nothing else to do.
+				_, _ = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
+					p.ZRem(ctx, "sessions:expiring", id)
+					return nil
+				})
+				return nil
+			}
+			sess.Status = SessionStatusExpired
+			updated, err := json.Marshal(&sess)
+			if err != nil {
+				return err
+			}
+			pipe := tx.TxPipeline()
+			pipe.Set(ctx, "session:"+id, updated, 0)
+			pipe.ZRem(ctx, "sessions:expiring", id)
+			// Release any ghost tx reservation (a pending session may have
+			// stashed a hash but never reached Complete — extraordinarily
+			// rare; we belt-and-braces it).
+			if sess.InitialTransferTx != "" {
+				pipe.Del(ctx, "tx:"+sess.InitialTransferTx)
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				return err
+			}
+			n++
+			return nil
+		}, "session:"+id)
+
+		if err == redis.TxFailedErr {
+			// Lost the race to a concurrent CompleteSession; that's fine —
+			// the session is now completed and out of the expiring index.
+			continue
+		}
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
 }
 
 func (s *RedisStore) DueBefore(ctx context.Context, t time.Time, limit int) ([]*Subscription, error) {

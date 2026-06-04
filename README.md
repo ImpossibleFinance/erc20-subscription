@@ -47,6 +47,76 @@ The contract is **just a permissioned ERC-20 puller** — no plan state, no on-c
 
 ---
 
+## Hosted checkout sessions
+
+The flow above assumes your app already knows the user's wallet address — you collected it, then called `POST /admin/subscriptions` server-to-server. **Hosted checkout sessions** are the alternative for when you *don't* know the wallet yet: you mint a one-shot session, hand the user a URL, and the wallet is *discovered* from the EIP-191 signature the user produces at checkout. The backend verifies the user's first-month payment on-chain before creating the subscription, then fires a `session.completed` webhook carrying whatever opaque `metadata` you stamped on the session (typically your own user id) so you can bind the recovered wallet to your user record.
+
+### Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as integrator
+    participant API as subs backend
+    participant Page as checkout page
+    participant W as user wallet
+    participant Chain as on-chain
+
+    App->>API: POST /admin/sessions {plan_id, metadata}
+    API-->>App: {session_id, checkout_url}
+    App->>W: redirect user to checkout_url
+    Page->>API: GET /sessions/{id}
+    API-->>Page: plan, treasury, contract, chain, allowance target
+    Page->>W: popup #1 — USDC.approve(contract, N)  [skip if allowance ok]
+    W->>Chain: approve tx
+    Page->>W: popup #2 — USDC.transfer(treasury, price)
+    W->>Chain: transfer tx (month 1 paid)
+    Page->>W: popup #3 — personal_sign(challenge)
+    W-->>Page: signature
+    Page->>API: POST /sessions/{id}/complete
+    API->>Chain: verify transfer + allowance + recover signer
+    API-->>Page: {status: completed, wallet, subscription_id}
+    API->>App: POST webhook — session.completed {wallet, metadata, ...}
+```
+
+### What the user sees
+
+The hosted checkout page — plan picker + summary of what the wallet will be asked to do:
+
+![](docs/img/checkout-landing.png)
+
+Three wallet popups in sequence:
+
+| step | what the wallet asks | |
+|---|---|---|
+| 1 | approve future renewals (skipped if existing allowance covers) | ![](docs/img/popup-approve.png) |
+| 2 | transfer month 1 directly to the treasury | ![](docs/img/popup-transfer.png) |
+| 3 | sign the EIP-191 challenge that proves intent | ![](docs/img/popup-sign.png) |
+
+Success state — month 1 is on-chain, the subscription is created, and the `session.completed` webhook has been emitted:
+
+![](docs/img/complete.png)
+
+The page runs a full preflight (chain id, account, balance, allowance) *before* opening each popup, so the user is never asked to sign something the server would reject.
+
+### When `/complete` returns a typed error
+
+The five codes you'll handle in practice:
+
+| code | HTTP | what the page does |
+|---|---|---|
+| `transfer_not_mined` | 425 | **poll** — re-POST every 5s for up to 60s, then surface "Waiting for confirmation…" |
+| `insufficient_allowance` | 422 | **re-approve** — reopen popup #1 for the missing delta, then re-POST |
+| `signature_invalid` / `challenge_expired` | 401 | **retry-sign** — rebuild the message with a fresh `Issued` and reopen popup #3 |
+| `transfer_from_mismatch` | 422 | **unrecoverable** — "You signed with A but paid from B. Start over with one wallet." |
+| `transfer_already_consumed` | 409 | **unrecoverable** — that payment is already bound to a different session; start over |
+
+Everything else (`transfer_wrong_token`, `transfer_wrong_recipient`, `transfer_wrong_amount`, `transfer_reverted`, …) is unrecoverable from the page: surface the typed code and a "contact support, tx `<hash>`" message. The session stays `pending` on every failure, so the user can fix the underlying condition and resubmit without minting a new session.
+
+Full spec, including the verification ladder, idempotency rules, operator recovery, and the complete error table: [`docs/checkout-sessions.md`](docs/checkout-sessions.md).
+
+---
+
 ## Contract
 
 `contracts/src/Subscriptions.sol` — ~50 lines.
